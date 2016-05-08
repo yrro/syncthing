@@ -1255,8 +1255,7 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 		// There is an old file or directory already in place. We need to
 		// handle that.
 
-		switch {
-		case stat.IsDir() || stat.Mode()&os.ModeSymlink != 0:
+		if stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
 			// It's a directory or a symlink. These are not versioned or
 			// archived for conflicts, only removed (which of course fails for
 			// non-empty directories).
@@ -1268,8 +1267,9 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 			if err = osutil.InWritableDir(osutil.Remove, state.realName); err != nil {
 				return err
 			}
+		}
 
-		case f.inConflict(state.version, state.file.Version):
+		if f.inConflict(state.version, state.file.Version) {
 			// The new file has been changed in conflict with the existing one. We
 			// should file it away as a conflict instead of just removing or
 			// archiving. Also merge with the version vector we had, to indicate
@@ -1279,8 +1279,9 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 			if err = osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
 				return err
 			}
+		}
 
-		case f.versioner != nil:
+		if f.versioner != nil {
 			// If we should use versioning, let the versioner archive the old
 			// file before we replace it. Archiving a non-existent file is not
 			// an error.
