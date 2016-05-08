@@ -7,9 +7,9 @@
 package versioner
 
 import (
-	"testing"
-	"os"
 	"io/ioutil"
+	"os"
+	"testing"
 )
 
 func TestDefaultVersioning(t *testing.T) {
@@ -18,24 +18,24 @@ func TestDefaultVersioning(t *testing.T) {
 	os.RemoveAll(testDir)
 	defer os.RemoveAll(testDir)
 
-	err := os.Mkdir(testDir,0755)
-	if err != nil{
-		t.Fatal("could not create dir '%s' : %s",testDir,err)
+	err := os.Mkdir(testDir, 0755)
+	if err != nil {
+		t.Fatal("could not create dir '%s' : %s", testDir, err)
 	}
 	if err := ioutil.WriteFile("testdata/file", []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// action
-	NewDefault("folderId","folderPath",map[string]string{}).Archive("testdata/file")
+	NewDefault("folderId", "folderPath", map[string]string{}).Archive("testdata/file")
 
 	fileInfos, err := ioutil.ReadDir(testDir)
-	if (err != nil){
-		t.Fatal("could not list dir %s: %s", testDir,err )
+	if err != nil {
+		t.Fatal("could not list dir %s: %s", testDir, err)
 	}
 
 	// verify
 	if len(fileInfos) != 0 {
-		t.Error("dir %s should be empty, but has %d entries", testDir,len(fileInfos))
+		t.Error("dir %s should be empty, but has %d entries", testDir, len(fileInfos))
 	}
 }
