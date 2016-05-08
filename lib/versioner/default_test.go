@@ -20,7 +20,7 @@ func TestDefaultVersioning(t *testing.T) {
 
 	err := os.Mkdir(testDir, 0755)
 	if err != nil {
-		t.Fatal("could not create dir '%s' : %s", testDir, err)
+		t.Fatalf("could not create dir '%s' : %s", testDir, err)
 	}
 	if err := ioutil.WriteFile("testdata/file", []byte("data"), 0644); err != nil {
 		t.Fatal(err)
@@ -31,11 +31,11 @@ func TestDefaultVersioning(t *testing.T) {
 
 	fileInfos, err := ioutil.ReadDir(testDir)
 	if err != nil {
-		t.Fatal("could not list dir %s: %s", testDir, err)
+		t.Fatalf("could not list dir %s: %s", testDir, err)
 	}
 
 	// verify
 	if len(fileInfos) != 0 {
-		t.Error("dir %s should be empty, but has %d entries", testDir, len(fileInfos))
+		t.Errorf("dir %s should be empty, but has %d entries", testDir, len(fileInfos))
 	}
 }
