@@ -1265,9 +1265,7 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 			if err = osutil.InWritableDir(osutil.Remove, state.realName); err != nil {
 				return err
 			}
-		}
-
-		if f.inConflict(state.version, state.file.Version) {
+		} else if f.inConflict(state.version, state.file.Version) {
 			// The new file has been changed in conflict with the existing one. We
 			// should file it away as a conflict instead of just removing or
 			// archiving. Also merge with the version vector we had, to indicate
@@ -1277,9 +1275,7 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 			if err = osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
 				return err
 			}
-		}
-
-		if f.versioner != nil {
+		} else if f.versioner != nil {
 			// If we should use versioning, let the versioner archive the old
 			// file before we replace it. Archiving a non-existent file is not
 			// an error.
