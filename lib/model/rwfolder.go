@@ -721,10 +721,8 @@ func (f *rwFolder) deleteFile(file protocol.FileInfo) {
 		// we have resolved the conflict.
 		file.Version = file.Version.Merge(cur.Version)
 		err = osutil.InWritableDir(f.moveForConflict, realName)
-	} else if f.versioner != nil {
-		err = osutil.InWritableDir(f.versioner.Archive, realName)
 	} else {
-		err = osutil.InWritableDir(osutil.Remove, realName)
+		err = osutil.InWritableDir(f.versioner.Archive, realName)
 	}
 
 	if err == nil || os.IsNotExist(err) {

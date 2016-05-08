@@ -163,20 +163,24 @@ func (m *Model) StartDeadlockDetector(timeout time.Duration) {
 }
 
 func (m *Model) buildVersioner(cfg config.FolderConfiguration, folder string) (ver versioner.Versioner) {
-	if len(cfg.Versioning.Type) > 0 {
-		versionerFactory, ok := versioner.Factories[cfg.Versioning.Type]
-		if !ok {
-			l.Fatalf("Requested versioning type %q that does not exist", cfg.Versioning.Type)
-		}
 
-		ver = versionerFactory(folder, cfg.Path(), cfg.Versioning.Params)
-		if service, ok := ver.(suture.Service); ok {
-			// The versioner implements the suture.Service interface, so
-			// expects to be run in the background in addition to being called
-			// when files are going to be archived.
-			token := m.Add(service)
-			m.folderRunnerTokens[folder] = append(m.folderRunnerTokens[folder], token)
-		}
+	versioningType := cfg.Versioning.Type
+	if len(versioningType) == 0 {
+		versioningType = "default"
+	}
+
+	versionerFactory, ok := versioner.Factories[versioningType]
+	if !ok {
+		l.Fatalf("Requested versioning type %q that does not exist", versioningType)
+	}
+
+	ver = versionerFactory(folder, cfg.Path(), cfg.Versioning.Params)
+	if service, ok := ver.(suture.Service); ok {
+		// The versioner implements the suture.Service interface, so
+		// expects to be run in the background in addition to being called
+		// when files are going to be archived.
+		token := m.Add(service)
+		m.folderRunnerTokens[folder] = append(m.folderRunnerTokens[folder], token)
 	}
 	return ver
 }
