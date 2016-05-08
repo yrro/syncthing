@@ -8,6 +8,7 @@ package versioner
 
 import (
 	"github.com/syncthing/syncthing/lib/osutil"
+	"os"
 )
 
 func init() {
@@ -26,5 +27,12 @@ func NewDefault(folderID, folderPath string, params map[string]string) Versioner
 // Archive deletes the named file away to a version archive. If this function
 // returns nil, the named file does not exist any more (has been archived).
 func (v Default) Archive(filePath string) error {
+	_, err := osutil.Lstat(filePath)
+	if os.IsNotExist(err) {
+		l.Debugln("not archiving nonexistent file", filePath)
+		return nil
+	} else if err != nil {
+		return err
+	}
 	return osutil.Remove(filePath)
 }

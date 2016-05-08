@@ -12,30 +12,50 @@ import (
 	"testing"
 )
 
-func TestDefaultVersioning(t *testing.T) {
+func setupTestDataDir() {
+	os.RemoveAll("testdata")
+	os.Mkdir("testdata", 0755)
+	os.Chdir("testdata")
+}
 
-	testDir := "testdata"
-	os.RemoveAll(testDir)
-	defer os.RemoveAll(testDir)
+func cleanupTestDataDir() {
+	os.Chdir("..")
+	os.RemoveAll("testdata")
+}
 
-	err := os.Mkdir(testDir, 0755)
-	if err != nil {
-		t.Fatalf("could not create dir '%s' : %s", testDir, err)
-	}
-	if err := ioutil.WriteFile("testdata/file", []byte("data"), 0644); err != nil {
+func TestDefaultVersioning_SuccessfullRemoval(t *testing.T) {
+	setupTestDataDir()
+	defer cleanupTestDataDir()
+
+	if err := ioutil.WriteFile("file", []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// action
-	NewDefault("folderId", "folderPath", map[string]string{}).Archive("testdata/file")
-
-	fileInfos, err := ioutil.ReadDir(testDir)
+	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive("file")
 	if err != nil {
-		t.Fatalf("could not list dir %s: %s", testDir, err)
+		t.Error(err)
+	}
+
+	fileInfos, err := ioutil.ReadDir(".")
+	if err != nil {
+		t.Fatalf("could not list dir: %s", err)
 	}
 
 	// verify
 	if len(fileInfos) != 0 {
-		t.Errorf("dir %s should be empty, but has %d entries", testDir, len(fileInfos))
+		t.Errorf("dir should be empty, but has %d entries", len(fileInfos))
+	}
+}
+
+func TestDefaultVersioning_MissingFile(t *testing.T) {
+	setupTestDataDir()
+	defer cleanupTestDataDir()
+
+	// action
+	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive("file")
+
+	if err != nil {
+		t.Errorf("should be nil, as there was no file, but %v", err)
 	}
 }
