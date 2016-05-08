@@ -778,13 +778,9 @@ func (f *rwFolder) renameFile(source, target protocol.FileInfo) {
 	from := filepath.Join(f.dir, source.Name)
 	to := filepath.Join(f.dir, target.Name)
 
-	if f.versioner != nil {
-		err = osutil.Copy(from, to)
-		if err == nil {
-			err = osutil.InWritableDir(f.versioner.Archive, from)
-		}
-	} else {
-		err = osutil.TryRename(from, to)
+	err = osutil.Copy(from, to)
+	if err == nil {
+		err = osutil.InWritableDir(f.versioner.Archive, from)
 	}
 
 	if err == nil {
@@ -1310,10 +1306,9 @@ func (f *rwFolder) handleOldFileOrOldDirectory(stat os.FileInfo, state *sharedPu
 		if err := osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
 			return err
 		}
-	} else if f.versioner != nil {
-		// If we should use versioning, let the versioner archive the old
-		// file before we replace it. Archiving a non-existent file is not
-		// an error.
+	} else {
+		// Let the versioner archive the old file before we replace it.
+		// Archiving a non-existent file is not an error.
 
 		if err := f.versioner.Archive(state.realName); err != nil {
 			return err
