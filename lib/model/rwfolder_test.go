@@ -16,6 +16,7 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
 	"github.com/syncthing/syncthing/lib/sync"
+	"io/ioutil"
 )
 
 func init() {
@@ -461,5 +462,80 @@ func TestDeregisterOnFailInPull(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Didn't get anything to the finisher")
+	}
+}
+
+func setupTestDataDir() {
+	os.RemoveAll("testdata23")
+	os.Mkdir("testdata23", 0755)
+	os.Chdir("testdata23")
+}
+
+func cleanupTestDataDir() {
+	os.Chdir("..")
+	os.RemoveAll("testdata23")
+}
+
+func TestHandleOldFileOrDirectory_IsDirectory(t *testing.T) {
+	setupTestDataDir()
+	defer cleanupTestDataDir()
+
+	rwFolder := setUpRwFolder(&Model{})
+	state := &sharedPullerState{realName: "test"}
+
+	os.Mkdir("test", 0755)
+	fileInfo, _ := os.Lstat("test")
+
+	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+
+	if err != nil {
+		t.Errorf("failed to handle empty directory")
+	}
+
+	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) > 0 {
+		t.Errorf("should have deleted the empty directory")
+	}
+}
+
+func TestHandleOldFileOrDirectory_FailOnNonEmptyDirectory(t *testing.T) {
+	setupTestDataDir()
+	defer cleanupTestDataDir()
+
+	rwFolder := setUpRwFolder(&Model{})
+	state := &sharedPullerState{realName: "test"}
+
+	os.Mkdir("test", 0755)
+	os.Mkdir("test/empty", 0755)
+	fileInfo, _ := os.Lstat("test")
+
+	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+
+	if err == nil {
+		t.Errorf("should fail on non-empty directory")
+	}
+
+	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) == 0 {
+		t.Errorf("should have failed on deletion")
+	}
+}
+
+func TestHandleOldFileOrDirectory_IsSymlink(t *testing.T) {
+	setupTestDataDir()
+	defer cleanupTestDataDir()
+
+	rwFolder := setUpRwFolder(&Model{})
+	state := &sharedPullerState{realName: "test"}
+
+	os.Symlink(".", "test")
+	fileInfo, _ := os.Lstat("test")
+
+	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+
+	if err != nil {
+		t.Errorf("should remove the symlink")
+	}
+
+	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) > 0 {
+		t.Errorf("should have deleted the symlink")
 	}
 }

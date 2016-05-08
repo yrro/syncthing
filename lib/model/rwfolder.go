@@ -1250,39 +1250,9 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 	}
 
 	if stat, err := osutil.Lstat(state.realName); err == nil {
-		// There is an old file or directory already in place. We need to
-		// handle that.
-
-		if stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
-			// It's a directory or a symlink. These are not versioned or
-			// archived for conflicts, only removed (which of course fails for
-			// non-empty directories).
-
-			// TODO: This is the place where we want to remove temporary files
-			// and future hard ignores before attempting a directory delete.
-			// Should share code with f.deletDir().
-
-			if err = osutil.InWritableDir(osutil.Remove, state.realName); err != nil {
-				return err
-			}
-		} else if f.inConflict(state.version, state.file.Version) {
-			// The new file has been changed in conflict with the existing one. We
-			// should file it away as a conflict instead of just removing or
-			// archiving. Also merge with the version vector we had, to indicate
-			// we have resolved the conflict.
-
-			state.file.Version = state.file.Version.Merge(state.version)
-			if err = osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
-				return err
-			}
-		} else if f.versioner != nil {
-			// If we should use versioning, let the versioner archive the old
-			// file before we replace it. Archiving a non-existent file is not
-			// an error.
-
-			if err = f.versioner.Archive(state.realName); err != nil {
-				return err
-			}
+		err = f.handleOldFileOrOldDirectory(stat, state)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -1314,6 +1284,41 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 
 	// Record the updated file in the index
 	f.dbUpdates <- dbUpdateJob{state.file, dbUpdateHandleFile}
+	return nil
+}
+
+func (f *rwFolder) handleOldFileOrOldDirectory(stat os.FileInfo, state *sharedPullerState) error {
+	if stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
+		// It's a directory or a symlink. These are not versioned or
+		// archived for conflicts, only removed (which of course fails for
+		// non-empty directories).
+
+		// TODO: This is the place where we want to remove temporary files
+		// and future hard ignores before attempting a directory delete.
+		// Should share code with f.deletDir().
+
+		if err := osutil.InWritableDir(osutil.Remove, state.realName); err != nil {
+			return err
+		}
+	} else if f.inConflict(state.version, state.file.Version) {
+		// The new file has been changed in conflict with the existing one. We
+		// should file it away as a conflict instead of just removing or
+		// archiving. Also merge with the version vector we had, to indicate
+		// we have resolved the conflict.
+
+		state.file.Version = state.file.Version.Merge(state.version)
+		if err := osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
+			return err
+		}
+	} else if f.versioner != nil {
+		// If we should use versioning, let the versioner archive the old
+		// file before we replace it. Archiving a non-existent file is not
+		// an error.
+
+		if err := f.versioner.Archive(state.realName); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
