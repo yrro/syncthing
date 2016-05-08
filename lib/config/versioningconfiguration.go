@@ -40,7 +40,6 @@ func (c *VersioningConfiguration) MarshalXML(e *xml.Encoder, start xml.StartElem
 	}
 
 	return e.EncodeElement(tmp, start)
-
 }
 
 func (c *VersioningConfiguration) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
