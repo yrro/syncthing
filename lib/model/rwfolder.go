@@ -1245,8 +1245,7 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 		f.virtualMtimeRepo.UpdateMtime(state.file.Name, info.ModTime(), t)
 	}
 
-	err := f.handleOldFileOrOldDirectory(state)
-	if err != nil {
+	if err := f.handleOldFileOrOldDirectory(state); err != nil {
 		return err
 	}
 
