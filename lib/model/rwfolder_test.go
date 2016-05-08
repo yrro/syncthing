@@ -484,9 +484,8 @@ func TestHandleOldFileOrDirectory_IsDirectory(t *testing.T) {
 	state := &sharedPullerState{realName: "test"}
 
 	os.Mkdir("test", 0755)
-	fileInfo, _ := os.Lstat("test")
 
-	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+	err := rwFolder.handleOldFileOrOldDirectory(state)
 
 	if err != nil {
 		t.Errorf("failed to handle empty directory")
@@ -506,9 +505,8 @@ func TestHandleOldFileOrDirectory_FailOnNonEmptyDirectory(t *testing.T) {
 
 	os.Mkdir("test", 0755)
 	os.Mkdir("test/empty", 0755)
-	fileInfo, _ := os.Lstat("test")
 
-	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+	err := rwFolder.handleOldFileOrOldDirectory(state)
 
 	if err == nil {
 		t.Errorf("should fail on non-empty directory")
@@ -527,9 +525,8 @@ func TestHandleOldFileOrDirectory_IsSymlink(t *testing.T) {
 	state := &sharedPullerState{realName: "test"}
 
 	os.Symlink(".", "test")
-	fileInfo, _ := os.Lstat("test")
 
-	err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state)
+	err := rwFolder.handleOldFileOrOldDirectory(state)
 
 	if err != nil {
 		t.Errorf("should remove the symlink")
