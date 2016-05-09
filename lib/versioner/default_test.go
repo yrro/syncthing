@@ -12,32 +12,27 @@ import (
 	"testing"
 )
 
-func setupTestDataDir() {
-	os.RemoveAll("testdata")
-	os.Mkdir("testdata", 0755)
-	os.Chdir("testdata")
+func setupTestDataDir(testdir string) {
+	os.RemoveAll(testdir)
+	os.Mkdir(testdir, 0755)
 }
 
-func cleanupTestDataDir() {
-	os.Chdir("..")
-	os.RemoveAll("testdata")
-}
+func TestDefaultVersioningOnSuccessfullRemoval(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
 
-func TestDefaultVersioning_SuccessfullRemoval(t *testing.T) {
-	setupTestDataDir()
-	defer cleanupTestDataDir()
-
-	if err := ioutil.WriteFile("file", []byte("data"), 0644); err != nil {
+	if err := ioutil.WriteFile(testdir+"file", []byte("data"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// action
-	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive("file")
+	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive(testdir + "file")
 	if err != nil {
 		t.Error(err)
 	}
 
-	fileInfos, err := ioutil.ReadDir(".")
+	fileInfos, err := ioutil.ReadDir(testdir)
 	if err != nil {
 		t.Fatalf("could not list dir: %s", err)
 	}
@@ -48,12 +43,13 @@ func TestDefaultVersioning_SuccessfullRemoval(t *testing.T) {
 	}
 }
 
-func TestDefaultVersioning_MissingFile(t *testing.T) {
-	setupTestDataDir()
-	defer cleanupTestDataDir()
+func TestDefaultVersioningOnMissingFile(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
 
 	// action
-	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive("file")
+	err := NewDefault("folderId", "folderPath", map[string]string{}).Archive(testdir + "file")
 
 	if err != nil {
 		t.Errorf("should be nil, as there was no file, but %v", err)
