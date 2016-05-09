@@ -465,67 +465,64 @@ func TestDeregisterOnFailInPull(t *testing.T) {
 	}
 }
 
-func setupTestDataDir() {
-	os.RemoveAll("testdata23")
-	os.Mkdir("testdata23", 0755)
-	os.Chdir("testdata23")
+func setupTestDataDir(testdir string) {
+	os.RemoveAll(testdir)
+	os.Mkdir(testdir, 0755)
 }
 
-func cleanupTestDataDir() {
-	os.Chdir("..")
-	os.RemoveAll("testdata23")
-}
-
-func TestHandleOldFileOrDirectory_IsDirectory(t *testing.T) {
-	setupTestDataDir()
-	defer cleanupTestDataDir()
+func TestHandleOldFileOrDirectoryIsDirectory(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
 
 	rwFolder := setUpRwFolder(&Model{})
-	state := &sharedPullerState{realName: "test"}
+	state := &sharedPullerState{realName: testdir + "test"}
 
-	os.Mkdir("test", 0755)
+	os.Mkdir(testdir+"test", 0755)
 
 	if err := rwFolder.handleOldFileOrOldDirectory(state); err != nil {
 		t.Errorf("failed to handle empty directory")
 	}
 
-	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) > 0 {
+	if fileInfos, _ := ioutil.ReadDir(testdir); len(fileInfos) > 0 {
 		t.Errorf("should have deleted the empty directory")
 	}
 }
 
-func TestHandleOldFileOrDirectory_FailOnNonEmptyDirectory(t *testing.T) {
-	setupTestDataDir()
-	defer cleanupTestDataDir()
+func TestHandleOldFileOrDirectoryFailOnNonEmptyDirectory(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
 
 	rwFolder := setUpRwFolder(&Model{})
-	state := &sharedPullerState{realName: "test"}
+	state := &sharedPullerState{realName: testdir + "test"}
 
-	os.MkdirAll("test/empty", 0755)
+	os.MkdirAll(testdir+"test/empty", 0755)
 
 	if err := rwFolder.handleOldFileOrOldDirectory(state); err == nil {
 		t.Errorf("should fail on non-empty directory")
 	}
 
-	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) == 0 {
+	if fileInfos, _ := ioutil.ReadDir(testdir); len(fileInfos) == 0 {
 		t.Errorf("should have failed on deletion")
 	}
 }
 
-func TestHandleOldFileOrDirectory_IsSymlink(t *testing.T) {
-	setupTestDataDir()
-	defer cleanupTestDataDir()
+func TestHandleOldFileOrDirectoryIsSymlink(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
 
 	rwFolder := setUpRwFolder(&Model{})
-	state := &sharedPullerState{realName: "test"}
+	state := &sharedPullerState{realName: testdir + "/test"}
 
-	os.Symlink(".", "test")
+	os.Symlink(".", testdir+"test")
 
 	if err := rwFolder.handleOldFileOrOldDirectory(state); err != nil {
 		t.Errorf("should remove the symlink")
 	}
 
-	if fileInfos, _ := ioutil.ReadDir("."); len(fileInfos) > 0 {
+	if fileInfos, _ := ioutil.ReadDir(testdir); len(fileInfos) > 0 {
 		t.Errorf("should have deleted the symlink")
 	}
 }
