@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/scanner"
 	"github.com/syncthing/syncthing/lib/sync"
@@ -480,7 +481,8 @@ func TestHandleOldFileOrDirectoryIsDirectory(t *testing.T) {
 
 	os.Mkdir(testdir+"test", 0755)
 
-	if err := rwFolder.handleOldFileOrOldDirectory(state); err != nil {
+	fileInfo, _ := osutil.Lstat(state.realName)
+	if err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state); err != nil {
 		t.Errorf("failed to handle empty directory")
 	}
 
@@ -499,7 +501,8 @@ func TestHandleOldFileOrDirectoryFailOnNonEmptyDirectory(t *testing.T) {
 
 	os.MkdirAll(testdir+"test/empty", 0755)
 
-	if err := rwFolder.handleOldFileOrOldDirectory(state); err == nil {
+	fileInfo, _ := osutil.Lstat(state.realName)
+	if err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state); err == nil {
 		t.Errorf("should fail on non-empty directory")
 	}
 
@@ -518,7 +521,8 @@ func TestHandleOldFileOrDirectoryIsSymlink(t *testing.T) {
 
 	os.Symlink(".", testdir+"test")
 
-	if err := rwFolder.handleOldFileOrOldDirectory(state); err != nil {
+	fileInfo, _ := osutil.Lstat(state.realName)
+	if err := rwFolder.handleOldFileOrOldDirectory(fileInfo, state); err != nil {
 		t.Errorf("should remove the symlink")
 	}
 

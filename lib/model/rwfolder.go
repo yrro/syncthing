@@ -1251,8 +1251,10 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 		f.virtualMtimeRepo.UpdateMtime(state.file.Name, info.ModTime(), t)
 	}
 
-	if err := f.handleOldFileOrOldDirectory(state); err != nil {
-		return err
+	if fileInfo, err := osutil.Lstat(state.realName); err == nil {
+		if err := f.handleOldFileOrOldDirectory(fileInfo, state); err != nil {
+			return err
+		}
 	}
 
 	// Replace the original content with the new one
@@ -1286,12 +1288,7 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 	return nil
 }
 
-func (f *rwFolder) handleOldFileOrOldDirectory(state *sharedPullerState) error {
-	fileInfo, err := osutil.Lstat(state.realName)
-	if err != nil {
-		return err
-	}
-
+func (f *rwFolder) handleOldFileOrOldDirectory(fileInfo os.FileInfo, state *sharedPullerState) (err error) {
 	if fileInfo.IsDir() || fileInfo.Mode()&os.ModeSymlink != 0 {
 		// It's a directory or a symlink. These are not versioned or
 		// archived for conflicts, only removed (which of course fails for
