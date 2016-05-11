@@ -55,3 +55,25 @@ func TestDefaultVersioningOnMissingFile(t *testing.T) {
 		t.Errorf("should be nil, as there was no file, but %v", err)
 	}
 }
+
+func TestDefaultVersioningRename(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
+
+	if err := ioutil.WriteFile(testdir+"from", []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// action
+	versioner:= NewDefault("folderId", "folderPath", map[string]string{})
+	err := versioner.Rename(testdir + "from",testdir + "to")
+
+	if err != nil {
+		t.Errorf("rename failed, but %v", err)
+	}
+
+	if _,err := os.Lstat(testdir+"to"); err != nil{
+		t.Errorf("rename failed, but %v", err)
+	}
+}

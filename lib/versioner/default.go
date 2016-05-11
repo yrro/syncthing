@@ -36,3 +36,7 @@ func (v Default) Archive(filePath string) error {
 	}
 	return osutil.Remove(filePath)
 }
+
+func (v Default) Rename(from, to string)error {
+	return osutil.TryRename(from, to)
+}
