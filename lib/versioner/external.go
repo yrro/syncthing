@@ -81,3 +81,11 @@ func (v External) Archive(filePath string) error {
 	}
 	return errors.New("Versioner: file was not removed by external script")
 }
+
+func (v External) Rename(from, to string) error {
+	err := osutil.Copy(from, to)
+	if err == nil {
+		err = osutil.InWritableDir(v.Archive, from)
+	}
+	return err
+}

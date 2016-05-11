@@ -66,14 +66,14 @@ func TestDefaultVersioningRename(t *testing.T) {
 	}
 
 	// action
-	versioner:= NewDefault("folderId", "folderPath", map[string]string{})
-	err := versioner.Rename(testdir + "from",testdir + "to")
+	versioner := NewDefault("folderId", "folderPath", map[string]string{})
+	err := versioner.Rename(testdir+"from", testdir+"to")
 
 	if err != nil {
 		t.Errorf("rename failed, but %v", err)
 	}
 
-	if _,err := os.Lstat(testdir+"to"); err != nil{
+	if _, err := os.Lstat(testdir + "to"); err != nil {
 		t.Errorf("rename failed, but %v", err)
 	}
 }

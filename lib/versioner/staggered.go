@@ -284,3 +284,11 @@ func (v Staggered) Archive(filePath string) error {
 
 	return nil
 }
+
+func (v Staggered) Rename(from, to string) error {
+	err := osutil.Copy(from, to)
+	if err == nil {
+		err = osutil.InWritableDir(v.Archive, from)
+	}
+	return err
+}

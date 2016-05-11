@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/d4l3k/messagediff"
+	"io/ioutil"
+	"os"
 )
 
 func TestStaggeredVersioningVersionCount(t *testing.T) {
@@ -62,5 +64,39 @@ func TestStaggeredVersioningVersionCount(t *testing.T) {
 	rem := v.toRemove(files, now)
 	if diff, equal := messagediff.PrettyDiff(delete, rem); !equal {
 		t.Errorf("Incorrect deleted files; got %v, expected %v\n%v", rem, delete, diff)
+	}
+}
+
+func TestStaggeredVersioningRename(t *testing.T) {
+	testdir := "testdata23/"
+	setupTestDataDir(testdir)
+	defer os.RemoveAll(testdir)
+
+	if err := ioutil.WriteFile(testdir+"from", []byte("data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	versioner := NewStaggered("folderId", testdir, map[string]string{}).(Staggered)
+
+	// action
+	err := versioner.Rename(testdir+"from", testdir+"to")
+
+	// check
+	if err != nil {
+		t.Errorf("rename failed, but %v", err)
+	}
+
+	if _, err := os.Lstat(testdir + "to"); err != nil {
+		t.Errorf("rename failed, but %v", err)
+	}
+
+	fileInfos, err := ioutil.ReadDir(testdir + ".stversions")
+	if err != nil {
+		t.Fatalf("could not list dir: %s", err)
+	}
+
+	// verify
+	if len(fileInfos) != 1 {
+		t.Errorf("dir should be have one")
 	}
 }

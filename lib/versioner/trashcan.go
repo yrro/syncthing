@@ -173,3 +173,11 @@ func (t *Trashcan) cleanoutArchive() error {
 	}
 	return nil
 }
+
+func (t Trashcan) Rename(from, to string) error {
+	err := osutil.Copy(from, to)
+	if err == nil {
+		err = osutil.InWritableDir(t.Archive, from)
+	}
+	return err
+}
