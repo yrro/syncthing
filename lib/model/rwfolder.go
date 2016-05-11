@@ -784,10 +784,7 @@ func (f *rwFolder) renameFile(source, target protocol.FileInfo) {
 	from := filepath.Join(f.dir, source.Name)
 	to := filepath.Join(f.dir, target.Name)
 
-	err = osutil.Copy(from, to)
-	if err == nil {
-		err = osutil.InWritableDir(f.versioner.Archive, from)
-	}
+	err = f.versioner.Rename(from, to)
 
 	if err == nil {
 		// The file was renamed, so we have handled both the necessary delete
