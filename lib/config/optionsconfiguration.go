@@ -16,6 +16,7 @@ type OptionsConfiguration struct {
 	MaxSendKbps             int      `xml:"maxSendKbps" json:"maxSendKbps"`
 	MaxRecvKbps             int      `xml:"maxRecvKbps" json:"maxRecvKbps"`
 	ReconnectIntervalS      int      `xml:"reconnectionIntervalS" json:"reconnectionIntervalS" default:"60"`
+	RelaysEnabled           bool     `xml:"relaysEnabled" json:"relaysEnabled" default:"true"`
 	RelayReconnectIntervalM int      `xml:"relayReconnectIntervalM" json:"relayReconnectIntervalM" default:"10"`
 	StartBrowser            bool     `xml:"startBrowser" json:"startBrowser" default:"true"`
 	NATEnabled              bool     `xml:"natEnabled" json:"natEnabled" default:"true"`
@@ -35,17 +36,16 @@ type OptionsConfiguration struct {
 	SymlinksEnabled         bool     `xml:"symlinksEnabled" json:"symlinksEnabled" default:"true"`
 	LimitBandwidthInLan     bool     `xml:"limitBandwidthInLan" json:"limitBandwidthInLan" default:"false"`
 	MinHomeDiskFreePct      float64  `xml:"minHomeDiskFreePct" json:"minHomeDiskFreePct" default:"1"`
-	ReleasesURL             string   `xml:"releasesURL" json:"releasesURL" default:"https://api.github.com/repos/syncthing/syncthing/releases?per_page=30"`
+	ReleasesURL             string   `xml:"releasesURL" json:"releasesURL" default:"https://upgrades.syncthing.net/meta.json"`
 	AlwaysLocalNets         []string `xml:"alwaysLocalNet" json:"alwaysLocalNets"`
 	OverwriteRemoteDevNames bool     `xml:"overwriteRemoteDeviceNamesOnConnect" json:"overwriteRemoteDeviceNamesOnConnect" default:"false"`
 	TempIndexMinBlocks      int      `xml:"tempIndexMinBlocks" json:"tempIndexMinBlocks" default:"10"`
 
-	DeprecatedUPnPEnabled   bool     `xml:"upnpEnabled" json:"-"`
-	DeprecatedUPnPLeaseM    int      `xml:"upnpLeaseMinutes" json:"-"`
-	DeprecatedUPnPRenewalM  int      `xml:"upnpRenewalMinutes" json:"-"`
-	DeprecatedUPnPTimeoutS  int      `xml:"upnpTimeoutSeconds" json:"-"`
-	DeprecatedRelaysEnabled bool     `xml:"relaysEnabled" json:"-"`
-	DeprecatedRelayServers  []string `xml:"relayServer" json:"-"`
+	DeprecatedUPnPEnabled  bool     `xml:"upnpEnabled,omitempty" json:"-"`
+	DeprecatedUPnPLeaseM   int      `xml:"upnpLeaseMinutes,omitempty" json:"-"`
+	DeprecatedUPnPRenewalM int      `xml:"upnpRenewalMinutes,omitempty" json:"-"`
+	DeprecatedUPnPTimeoutS int      `xml:"upnpTimeoutSeconds,omitempty" json:"-"`
+	DeprecatedRelayServers []string `xml:"relayServer,omitempty" json:"-"`
 }
 
 func (orig OptionsConfiguration) Copy() OptionsConfiguration {
