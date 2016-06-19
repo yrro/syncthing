@@ -1134,9 +1134,9 @@ func (s *apiService) getPeerCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *apiService) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 	current := qs.Get("current")
-	if current == "" && runtime.GOOS == "windows" {
-		if drives, err := osutil.GetDriveLetters(); err == nil {
-			sendJSON(w, drives)
+	if current == "" {
+		if roots, err := osutil.GetFilesystemRoots(); err == nil {
+			sendJSON(w, roots)
 		} else {
 			http.Error(w, err.Error(), 500)
 		}
@@ -1148,14 +1148,11 @@ func (s *apiService) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 		search = search + pathSeparator
 	}
 	subdirectories, _ := osutil.Glob(search + "*")
-	ret := make([]string, 0, 10)
+	ret := make([]string, 0, len(subdirectories))
 	for _, subdirectory := range subdirectories {
 		info, err := os.Stat(subdirectory)
 		if err == nil && info.IsDir() {
 			ret = append(ret, subdirectory+pathSeparator)
-			if len(ret) > 9 {
-				break
-			}
 		}
 	}
 

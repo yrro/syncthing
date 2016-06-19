@@ -94,7 +94,7 @@ type Model struct {
 	fmut               sync.RWMutex                                           // protects the above
 
 	conn              map[protocol.DeviceID]connections.Connection
-	helloMessages     map[protocol.DeviceID]protocol.HelloMessage
+	helloMessages     map[protocol.DeviceID]protocol.HelloResult
 	deviceClusterConf map[protocol.DeviceID]protocol.ClusterConfigMessage
 	devicePaused      map[protocol.DeviceID]bool
 	deviceDownloads   map[protocol.DeviceID]*deviceDownloadState
@@ -106,6 +106,14 @@ type folderFactory func(*Model, config.FolderConfiguration, versioner.Versioner)
 var (
 	symlinkWarning  = stdsync.Once{}
 	folderFactories = make(map[config.FolderType]folderFactory, 0)
+)
+
+// errors returned by the CheckFolderHealth method
+var (
+	errFolderPathMissing   = errors.New("folder path missing")
+	errFolderMarkerMissing = errors.New("folder marker missing")
+	errHomeDiskNoSpace     = errors.New("home disk has insufficient free space")
+	errFolderNoSpace       = errors.New("folder has insufficient free space")
 )
 
 // NewModel creates and starts a new model. The model starts in read-only mode,
@@ -139,7 +147,7 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, deviceName, clientName,
 		folderRunnerTokens: make(map[string][]suture.ServiceToken),
 		folderStatRefs:     make(map[string]*stats.FolderStatisticsReference),
 		conn:               make(map[protocol.DeviceID]connections.Connection),
-		helloMessages:      make(map[protocol.DeviceID]protocol.HelloMessage),
+		helloMessages:      make(map[protocol.DeviceID]protocol.HelloResult),
 		deviceClusterConf:  make(map[protocol.DeviceID]protocol.ClusterConfigMessage),
 		devicePaused:       make(map[protocol.DeviceID]bool),
 		deviceDownloads:    make(map[protocol.DeviceID]*deviceDownloadState),
@@ -185,7 +193,7 @@ func (m *Model) buildVersioner(cfg config.FolderConfiguration, folder string) (v
 	return ver
 }
 
-// StartFolder constrcuts the folder service and starts it.
+// StartFolder constructs the folder service and starts it.
 func (m *Model) StartFolder(folder string) {
 	m.fmut.Lock()
 	cfg, ok := m.folderCfgs[folder]
@@ -203,7 +211,44 @@ func (m *Model) StartFolder(folder string) {
 		panic(fmt.Sprintf("unknown folder type 0x%x", cfg.Type))
 	}
 
-	p := folderFactory(m, cfg, m.buildVersioner(cfg, folder))
+	fs := m.folderFiles[folder]
+	v, ok := fs.LocalVersion(protocol.LocalDeviceID), true
+	indexHasFiles := ok && v > 0
+	if !indexHasFiles {
+		// It's a blank folder, so this may the first time we're looking at
+		// it. Attempt to create and tag with our marker as appropriate. We
+		// don't really do anything with errors at this point except warn -
+		// if these things don't work, we still want to start the folder and
+		// it'll show up as errored later.
+
+		if _, err := os.Stat(cfg.Path()); os.IsNotExist(err) {
+			if err := osutil.MkdirAll(cfg.Path(), 0700); err != nil {
+				l.Warnln("Creating folder:", err)
+			}
+		}
+		if err := cfg.CreateMarker(); err != nil {
+			l.Warnln("Creating folder marker:", err)
+		}
+	}
+
+	var ver versioner.Versioner
+	if len(cfg.Versioning.Type) > 0 {
+		versionerFactory, ok := versioner.Factories[cfg.Versioning.Type]
+		if !ok {
+			l.Fatalf("Requested versioning type %q that does not exist", cfg.Versioning.Type)
+		}
+
+		ver = versionerFactory(folder, cfg.Path(), cfg.Versioning.Params)
+		if service, ok := ver.(suture.Service); ok {
+			// The versioner implements the suture.Service interface, so
+			// expects to be run in the background in addition to being called
+			// when files are going to be archived.
+			token := m.Add(service)
+			m.folderRunnerTokens[folder] = append(m.folderRunnerTokens[folder], token)
+		}
+	}
+
+	p := folderFactory(m, cfg, ver)
 	m.folderRunners[folder] = p
 
 	m.warnAboutOverwritingProtectedFiles(folder)
@@ -989,7 +1034,7 @@ func (m *Model) SetIgnores(folder string, content []string) error {
 // OnHello is called when an device connects to us.
 // This allows us to extract some information from the Hello message
 // and add it to a list of known devices ahead of any checks.
-func (m *Model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protocol.HelloMessage) {
+func (m *Model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protocol.HelloResult) {
 	for deviceID := range m.cfg.Devices() {
 		if deviceID == remoteID {
 			// Existing device, we will get the hello message in AddConnection
@@ -1009,8 +1054,8 @@ func (m *Model) OnHello(remoteID protocol.DeviceID, addr net.Addr, hello protoco
 }
 
 // GetHello is called when we are about to connect to some remote device.
-func (m *Model) GetHello(protocol.DeviceID) protocol.HelloMessage {
-	return protocol.HelloMessage{
+func (m *Model) GetHello(protocol.DeviceID) protocol.Version13HelloMessage {
+	return protocol.Version13HelloMessage{
 		DeviceName:    m.deviceName,
 		ClientName:    m.clientName,
 		ClientVersion: m.clientVersion,
@@ -1020,7 +1065,7 @@ func (m *Model) GetHello(protocol.DeviceID) protocol.HelloMessage {
 // AddConnection adds a new peer connection to the model. An initial index will
 // be sent to the connected peer, thereafter index updates whenever the local
 // folder changes.
-func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloMessage) {
+func (m *Model) AddConnection(conn connections.Connection, hello protocol.HelloResult) {
 	deviceID := conn.ID()
 
 	m.pmut.Lock()
@@ -1557,7 +1602,7 @@ func (m *Model) internalScanFolderSubdirs(folder string, subs []string) error {
 					batch = batch[:0]
 				}
 
-				if ignores.Match(f.Name).IsIgnored() || symlinkInvalid(folder, f) {
+				if !f.IsInvalid() && (ignores.Match(f.Name).IsIgnored() || symlinkInvalid(folder, f)) {
 					// File has been ignored or an unsupported symlink. Set invalid bit.
 					l.Debugln("setting invalid bit on ignored", f)
 					nf := protocol.FileInfo{
@@ -1910,53 +1955,73 @@ func (m *Model) CheckFolderHealth(id string) error {
 		return errors.New("folder does not exist")
 	}
 
-	if minFree := m.cfg.Options().MinHomeDiskFreePct; minFree > 0 {
-		if free, err := osutil.DiskFreePercentage(m.cfg.ConfigPath()); err == nil && free < minFree {
-			return errors.New("home disk has insufficient free space")
-		}
+	// Check for folder errors, with the most serious and specific first and
+	// generic ones like out of space on the home disk later. Note the
+	// inverted error flow (err==nil checks) here.
+
+	err := m.checkFolderPath(folder)
+	if err == nil {
+		err = m.checkFolderFreeSpace(folder)
+	}
+	if err == nil {
+		err = m.checkHomeDiskFree()
 	}
 
-	fi, err := os.Stat(folder.Path())
+	// Set or clear the error on the runner, which also does logging and
+	// generates events and stuff.
+	m.runnerExchangeError(folder, err)
 
-	v, ok := m.CurrentLocalVersion(id)
-	indexHasFiles := ok && v > 0
+	return err
+}
 
-	if indexHasFiles {
-		// There are files in the folder according to the index, so it must
-		// have existed and had a correct marker at some point. Verify that
-		// this is still the case.
-
-		switch {
-		case err != nil || !fi.IsDir():
-			err = errors.New("folder path missing")
-
-		case !folder.HasMarker():
-			err = errors.New("folder marker missing")
-
-		case folder.Type != config.FolderTypeReadOnly:
-			// Check for free space, if it isn't a master folder. We aren't
-			// going to change the contents of master folders, so we don't
-			// care about the amount of free space there.
-			diskFreeP, errDfp := osutil.DiskFreePercentage(folder.Path())
-			if errDfp == nil && diskFreeP < folder.MinDiskFreePct {
-				diskFreeBytes, _ := osutil.DiskFreeBytes(folder.Path())
-				str := fmt.Sprintf("insufficient free space (%d MiB, %.2f%%)", diskFreeBytes/1024/1024, diskFreeP)
-				err = errors.New(str)
-			}
-		}
-	} else {
-		// It's a blank folder, so this may the first time we're looking at
-		// it. Attempt to create and tag with our marker as appropriate.
-
-		if os.IsNotExist(err) {
-			err = osutil.MkdirAll(folder.Path(), 0700)
-		}
-
-		if err == nil && !folder.HasMarker() {
-			err = folder.CreateMarker()
-		}
+// checkFolderPath returns nil if the folder path exists and has the marker file.
+func (m *Model) checkFolderPath(folder config.FolderConfiguration) error {
+	if fi, err := os.Stat(folder.Path()); err != nil || !fi.IsDir() {
+		return errFolderPathMissing
 	}
 
+	if !folder.HasMarker() {
+		return errFolderMarkerMissing
+	}
+
+	return nil
+}
+
+// checkFolderFreeSpace returns nil if the folder has the required amount of
+// free space, or if folder free space checking is disabled.
+func (m *Model) checkFolderFreeSpace(folder config.FolderConfiguration) error {
+	if folder.MinDiskFreePct <= 0 {
+		return nil
+	}
+
+	free, err := osutil.DiskFreePercentage(folder.Path())
+	if err == nil && free < folder.MinDiskFreePct {
+		return errFolderNoSpace
+	}
+
+	return nil
+}
+
+// checkHomeDiskFree returns nil if the home disk has the required amount of
+// free space, or if home disk free space checking is disabled.
+func (m *Model) checkHomeDiskFree() error {
+	minFree := m.cfg.Options().MinHomeDiskFreePct
+	if minFree <= 0 {
+		return nil
+	}
+
+	free, err := osutil.DiskFreePercentage(m.cfg.ConfigPath())
+	if err == nil && free < minFree {
+		return errHomeDiskNoSpace
+	}
+
+	return nil
+}
+
+// runnerExchangeError sets the given error (which way be nil) on the folder
+// runner. If the error differs from any previous error, logging and events
+// happen.
+func (m *Model) runnerExchangeError(folder config.FolderConfiguration, err error) {
 	m.fmut.RLock()
 	runner, runnerExists := m.folderRunners[folder.ID]
 	m.fmut.RUnlock()
@@ -1981,8 +2046,6 @@ func (m *Model) CheckFolderHealth(id string) error {
 			runner.clearError()
 		}
 	}
-
-	return err
 }
 
 func (m *Model) ResetFolder(folder string) {
