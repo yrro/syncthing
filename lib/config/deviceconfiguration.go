@@ -15,6 +15,7 @@ type DeviceConfiguration struct {
 	Compression protocol.Compression `xml:"compression,attr" json:"compression"`
 	CertName    string               `xml:"certName,attr,omitempty" json:"certName"`
 	Introducer  bool                 `xml:"introducer,attr" json:"introducer"`
+	Paused      bool                 `xml:"paused" json:"paused"`
 }
 
 func NewDeviceConfiguration(id protocol.DeviceID, name string) DeviceConfiguration {

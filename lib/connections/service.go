@@ -300,8 +300,7 @@ func (s *Service) connect() {
 				continue
 			}
 
-			paused := s.model.IsPaused(deviceID)
-			if paused {
+			if deviceCfg.Paused {
 				continue
 			}
 
