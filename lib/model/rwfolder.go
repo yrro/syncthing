@@ -29,6 +29,7 @@ import (
 	"github.com/syncthing/syncthing/lib/symlinks"
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/versioner"
+	"github.com/syncthing/syncthing/lib/weakhash"
 )
 
 func init() {
@@ -1095,6 +1096,9 @@ func (f *rwFolder) copierRoutine(in <-chan copyBlocksState, pullChan chan<- pull
 		}
 		f.model.fmut.RUnlock()
 
+		existingFile, _ := os.Open(state.realName)
+		rollmap, _ := weakhash.RollMap(existingFile, protocol.BlockSize)
+
 		for _, block := range state.blocks {
 			if f.allowSparse && state.reused == 0 && block.IsEmpty() {
 				// The block is a block of all zeroes, and we are not reusing
@@ -1109,41 +1113,65 @@ func (f *rwFolder) copierRoutine(in <-chan copyBlocksState, pullChan chan<- pull
 			}
 
 			buf = buf[:int(block.Size)]
-			found := f.model.finder.Iterate(folders, block.Hash, func(folder, file string, index int32) bool {
-				fd, err := os.Open(filepath.Join(folderRoots[folder], file))
-				if err != nil {
-					return false
-				}
+			found := false
 
-				_, err = fd.ReadAt(buf, protocol.BlockSize*int64(index))
-				fd.Close()
-				if err != nil {
-					return false
-				}
-
-				hash, err := scanner.VerifyBuffer(buf, block)
-				if err != nil {
-					if hash != nil {
-						l.Debugf("Finder block mismatch in %s:%s:%d expected %q got %q", folder, file, index, block.Hash, hash)
-						err = f.model.finder.Fix(folder, file, index, block.Hash, hash)
-						if err != nil {
-							l.Warnln("finder fix:", err)
-						}
-					} else {
-						l.Debugln("Finder failed to verify buffer", err)
+			if block.WeakHash != 0 && existingFile != nil {
+				for _, offset := range rollmap[block.WeakHash] {
+					_, err := existingFile.ReadAt(buf, offset)
+					if err != nil {
+						break
 					}
-					return false
-				}
 
-				_, err = dstFd.WriteAt(buf, block.Offset)
-				if err != nil {
-					state.fail("dst write", err)
+					if _, err := scanner.VerifyBuffer(buf, block); err == nil {
+						found = true
+						_, err = dstFd.WriteAt(buf, block.Offset)
+						if err != nil {
+							state.fail("dst write", err)
+
+						}
+						state.copiedFromOrigin()
+						break
+					}
 				}
-				if file == state.file.Name {
-					state.copiedFromOrigin()
-				}
-				return true
-			})
+			}
+
+			if !found {
+				found = f.model.finder.Iterate(folders, block.Hash, func(folder, file string, index int32) bool {
+					fd, err := os.Open(filepath.Join(folderRoots[folder], file))
+					if err != nil {
+						return false
+					}
+
+					_, err = fd.ReadAt(buf, protocol.BlockSize*int64(index))
+					fd.Close()
+					if err != nil {
+						return false
+					}
+
+					hash, err := scanner.VerifyBuffer(buf, block)
+					if err != nil {
+						if hash != nil {
+							l.Debugf("Finder block mismatch in %s:%s:%d expected %q got %q", folder, file, index, block.Hash, hash)
+							err = f.model.finder.Fix(folder, file, index, block.Hash, hash)
+							if err != nil {
+								l.Warnln("finder fix:", err)
+							}
+						} else {
+							l.Debugln("Finder failed to verify buffer", err)
+						}
+						return false
+					}
+
+					_, err = dstFd.WriteAt(buf, block.Offset)
+					if err != nil {
+						state.fail("dst write", err)
+					}
+					if file == state.file.Name {
+						state.copiedFromOrigin()
+					}
+					return true
+				})
+			}
 
 			if state.failed() != nil {
 				break
@@ -1159,6 +1187,9 @@ func (f *rwFolder) copierRoutine(in <-chan copyBlocksState, pullChan chan<- pull
 			} else {
 				state.copyDone(block)
 			}
+		}
+		if existingFile != nil {
+			existingFile.Close()
 		}
 		out <- state.sharedPullerState
 	}
