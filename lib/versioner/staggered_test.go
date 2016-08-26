@@ -15,7 +15,6 @@ import (
 
 	"github.com/d4l3k/messagediff"
 	"io/ioutil"
-	"os"
 )
 
 func TestStaggeredVersioningVersionCount(t *testing.T) {
