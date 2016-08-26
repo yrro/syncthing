@@ -737,7 +737,6 @@ func (f *rwFolder) deleteFile(file protocol.FileInfo) {
 		// we have resolved the conflict.
 		file.Version = file.Version.Merge(cur.Version)
 		err = osutil.InWritableDir(f.moveForConflict, realName)
-	} else {
 	} else if f.versioner != nil {
 		err = osutil.InWritableDir(f.versioner.Archive, realName)
 	} else {
@@ -1324,7 +1323,7 @@ func (f *rwFolder) handleOldFileOrOldDirectory(fileInfo os.FileInfo, state *shar
 		// and future hard ignores before attempting a directory delete.
 		// Should share code with f.deletDir().
 
-		err = osutil.InWritableDir(osutil.Remove, state.realName)
+		err = osutil.InWritableDir(os.Remove, state.realName)
 	} else if f.inConflict(state.version, state.file.Version) {
 		// The new file has been changed in conflict with the existing one. We
 		// should file it away as a conflict instead of just removing or

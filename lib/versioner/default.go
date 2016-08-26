@@ -34,7 +34,7 @@ func (v Default) Archive(filePath string) error {
 	} else if err != nil {
 		return err
 	}
-	return osutil.Remove(filePath)
+	return os.Remove(filePath)
 }
 
 func (v Default) Rename(from, to string) error {
