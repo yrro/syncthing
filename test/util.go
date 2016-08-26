@@ -208,7 +208,7 @@ func alterFiles(dir string) error {
 							return err
 						}
 					} else {
-						err := osutil.Remove(path)
+						err := os.Remove(path)
 						if err != nil {
 							return err
 						}
@@ -455,7 +455,7 @@ func startWalker(dir string, res chan<- fileInfo, abort <-chan struct{}) chan er
 			f = fileInfo{
 				name: rn,
 				mode: info.Mode(),
-				mod:  info.ModTime().Unix(),
+				mod:  info.ModTime().Truncate(time.Microsecond).UnixNano(),
 				size: info.Size(),
 			}
 			sum, err := md5file(path)

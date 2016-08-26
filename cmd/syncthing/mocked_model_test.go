@@ -21,8 +21,8 @@ func (m *mockedModel) GlobalDirectoryTree(folder, prefix string, levels int, dir
 	return nil
 }
 
-func (m *mockedModel) Completion(device protocol.DeviceID, folder string) float64 {
-	return 0
+func (m *mockedModel) Completion(device protocol.DeviceID, folder string) model.FolderCompletion {
+	return model.FolderCompletion{}
 }
 
 func (m *mockedModel) Override(folder string) {}
@@ -85,7 +85,7 @@ func (m *mockedModel) ScanFolders() map[string]error {
 	return nil
 }
 
-func (m *mockedModel) ScanFolderSubs(folder string, subs []string) error {
+func (m *mockedModel) ScanFolderSubdirs(folder string, subs []string) error {
 	return nil
 }
 
@@ -103,11 +103,11 @@ func (m *mockedModel) LocalSize(folder string) (nfiles, deleted int, bytes int64
 	return 0, 0, 0
 }
 
-func (m *mockedModel) CurrentLocalVersion(folder string) (int64, bool) {
+func (m *mockedModel) CurrentSequence(folder string) (int64, bool) {
 	return 0, false
 }
 
-func (m *mockedModel) RemoteLocalVersion(folder string) (int64, bool) {
+func (m *mockedModel) RemoteSequence(folder string) (int64, bool) {
 	return 0, false
 }
 

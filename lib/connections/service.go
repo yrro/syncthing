@@ -36,7 +36,10 @@ var (
 	listeners = make(map[string]listenerFactory, 0)
 )
 
-const perDeviceWarningRate = 1.0 / (15 * 60) // Once per 15 minutes
+const (
+	perDeviceWarningRate = 1.0 / (15 * 60) // Once per 15 minutes
+	tlsHandshakeTimeout  = 10 * time.Second
+)
 
 // Service listens and dials all configured unconnected devices, via supported
 // dialers. Successful connections are handed to the model.
@@ -159,8 +162,17 @@ next:
 		if err != nil {
 			if protocol.IsVersionMismatch(err) {
 				// The error will be a relatively user friendly description
-				// of what's wrong with the version compatibility
-				msg := fmt.Sprintf("Connecting to %s (%s): %s", remoteID, c.RemoteAddr(), err)
+				// of what's wrong with the version compatibility. By
+				// default identify the other side by device ID and IP.
+				remote := fmt.Sprintf("%v (%v)", remoteID, c.RemoteAddr())
+				if hello.DeviceName != "" {
+					// If the name was set in the hello return, use that to
+					// give the user more info about which device is the
+					// affected one. It probably says more than the remote
+					// IP.
+					remote = fmt.Sprintf("%q (%s %s, %v)", hello.DeviceName, hello.ClientName, hello.ClientVersion, remoteID)
+				}
+				msg := fmt.Sprintf("Connecting to %s: %s", remote, err)
 				warningFor(remoteID, msg)
 			} else {
 				// It's something else - connection reset or whatever
@@ -171,19 +183,26 @@ next:
 		}
 		c.SetDeadline(time.Time{})
 
-		s.model.OnHello(remoteID, c.RemoteAddr(), hello)
+		// The Model will return an error for devices that we don't want to
+		// have a connection with for whatever reason, for example unknown devices.
+		if err := s.model.OnHello(remoteID, c.RemoteAddr(), hello); err != nil {
+			l.Infof("Connection from %s at %s (%s) rejected: %v", remoteID, c.RemoteAddr(), c.Type, err)
+			c.Close()
+			continue
+		}
 
 		// If we have a relay connection, and the new incoming connection is
 		// not a relay connection, we should drop that, and prefer the this one.
+		connected := s.model.ConnectedTo(remoteID)
 		s.curConMut.Lock()
 		ct, ok := s.currentConnection[remoteID]
 		s.curConMut.Unlock()
+		priorityKnown := ok && connected
 
 		// Lower priority is better, just like nice etc.
-		if ok && ct.Priority > c.Priority {
+		if priorityKnown && ct.Priority > c.Priority {
 			l.Debugln("Switching connections", remoteID)
-			s.model.Close(remoteID, protocol.ErrSwitchingConnections)
-		} else if s.model.ConnectedTo(remoteID) {
+		} else if connected {
 			// We should not already be connected to the other party. TODO: This
 			// could use some better handling. If the old connection is dead but
 			// hasn't timed out yet we may want to drop *that* connection and keep
@@ -193,63 +212,56 @@ next:
 			l.Infof("Connected to already connected device (%s)", remoteID)
 			c.Close()
 			continue
-		} else if s.model.IsPaused(remoteID) {
-			l.Infof("Connection from paused device (%s)", remoteID)
+		}
+
+		deviceCfg, ok := s.cfg.Device(remoteID)
+		if !ok {
+			panic("bug: unknown device should already have been rejected")
+		}
+
+		// Verify the name on the certificate. By default we set it to
+		// "syncthing" when generating, but the user may have replaced
+		// the certificate and used another name.
+		certName := deviceCfg.CertName
+		if certName == "" {
+			certName = s.tlsDefaultCommonName
+		}
+		if err := remoteCert.VerifyHostname(certName); err != nil {
+			// Incorrect certificate name is something the user most
+			// likely wants to know about, since it's an advanced
+			// config. Warn instead of Info.
+			l.Warnf("Bad certificate from %s (%v): %v", remoteID, c.RemoteAddr(), err)
 			c.Close()
-			continue
+			continue next
 		}
 
-		for deviceID, deviceCfg := range s.cfg.Devices() {
-			if deviceID == remoteID {
-				// Verify the name on the certificate. By default we set it to
-				// "syncthing" when generating, but the user may have replaced
-				// the certificate and used another name.
-				certName := deviceCfg.CertName
-				if certName == "" {
-					certName = s.tlsDefaultCommonName
-				}
-				err := remoteCert.VerifyHostname(certName)
-				if err != nil {
-					// Incorrect certificate name is something the user most
-					// likely wants to know about, since it's an advanced
-					// config. Warn instead of Info.
-					l.Warnf("Bad certificate from %s (%v): %v", remoteID, c.RemoteAddr(), err)
-					c.Close()
-					continue next
-				}
+		// If rate limiting is set, and based on the address we should
+		// limit the connection, then we wrap it in a limiter.
 
-				// If rate limiting is set, and based on the address we should
-				// limit the connection, then we wrap it in a limiter.
+		limit := s.shouldLimit(c.RemoteAddr())
 
-				limit := s.shouldLimit(c.RemoteAddr())
-
-				wr := io.Writer(c)
-				if limit && s.writeRateLimit != nil {
-					wr = NewWriteLimiter(c, s.writeRateLimit)
-				}
-
-				rd := io.Reader(c)
-				if limit && s.readRateLimit != nil {
-					rd = NewReadLimiter(c, s.readRateLimit)
-				}
-
-				name := fmt.Sprintf("%s-%s (%s)", c.LocalAddr(), c.RemoteAddr(), c.Type)
-				protoConn := protocol.NewConnection(remoteID, rd, wr, s.model, name, deviceCfg.Compression)
-				modelConn := Connection{c, protoConn}
-
-				l.Infof("Established secure connection to %s at %s", remoteID, name)
-				l.Debugf("cipher suite: %04X in lan: %t", c.ConnectionState().CipherSuite, !limit)
-
-				s.model.AddConnection(modelConn, hello)
-				s.curConMut.Lock()
-				s.currentConnection[remoteID] = modelConn
-				s.curConMut.Unlock()
-				continue next
-			}
+		wr := io.Writer(c)
+		if limit && s.writeRateLimit != nil {
+			wr = NewWriteLimiter(c, s.writeRateLimit)
 		}
 
-		l.Infof("Connection from %s (%s) with ignored device ID %s", c.RemoteAddr(), c.Type, remoteID)
-		c.Close()
+		rd := io.Reader(c)
+		if limit && s.readRateLimit != nil {
+			rd = NewReadLimiter(c, s.readRateLimit)
+		}
+
+		name := fmt.Sprintf("%s-%s (%s)", c.LocalAddr(), c.RemoteAddr(), c.Type)
+		protoConn := protocol.NewConnection(remoteID, rd, wr, s.model, name, deviceCfg.Compression)
+		modelConn := Connection{c, protoConn}
+
+		l.Infof("Established secure connection to %s at %s", remoteID, name)
+		l.Debugf("cipher suite: %04X in lan: %t", c.ConnectionState().CipherSuite, !limit)
+
+		s.model.AddConnection(modelConn, hello)
+		s.curConMut.Lock()
+		s.currentConnection[remoteID] = modelConn
+		s.curConMut.Unlock()
+		continue next
 	}
 }
 
@@ -295,10 +307,11 @@ func (s *Service) connect() {
 
 			connected := s.model.ConnectedTo(deviceID)
 			s.curConMut.Lock()
-			ct := s.currentConnection[deviceID]
+			ct, ok := s.currentConnection[deviceID]
 			s.curConMut.Unlock()
+			priorityKnown := ok && connected
 
-			if connected && ct.Priority == bestDialerPrio {
+			if priorityKnown && ct.Priority == bestDialerPrio {
 				// Things are already as good as they can get.
 				continue
 			}
@@ -346,8 +359,8 @@ func (s *Service) connect() {
 					continue
 				}
 
-				if connected && dialerFactory.Priority() >= ct.Priority {
-					l.Debugf("Not dialing using %s as priorty is less than current connection (%d >= %d)", dialerFactory, dialerFactory.Priority(), ct.Priority)
+				if priorityKnown && dialerFactory.Priority() >= ct.Priority {
+					l.Debugf("Not dialing using %s as priority is less than current connection (%d >= %d)", dialerFactory, dialerFactory.Priority(), ct.Priority)
 					continue
 				}
 
@@ -359,10 +372,6 @@ func (s *Service) connect() {
 				if err != nil {
 					l.Debugln("dial failed", deviceCfg.DeviceID, uri, err)
 					continue
-				}
-
-				if connected {
-					s.model.Close(deviceID, protocol.ErrSwitchingConnections)
 				}
 
 				s.conns <- conn
@@ -425,10 +434,6 @@ func (s *Service) VerifyConfiguration(from, to config.Configuration) error {
 }
 
 func (s *Service) CommitConfiguration(from, to config.Configuration) bool {
-	// We require a restart if a device as been removed.
-
-	restart := false
-
 	newDevices := make(map[protocol.DeviceID]bool, len(to.Devices))
 	for _, dev := range to.Devices {
 		newDevices[dev.DeviceID] = true
@@ -436,7 +441,12 @@ func (s *Service) CommitConfiguration(from, to config.Configuration) bool {
 
 	for _, dev := range from.Devices {
 		if !newDevices[dev.DeviceID] {
-			restart = true
+			s.curConMut.Lock()
+			delete(s.currentConnection, dev.DeviceID)
+			s.curConMut.Unlock()
+			warningLimitersMut.Lock()
+			delete(warningLimiters, dev.DeviceID)
+			warningLimitersMut.Unlock()
 		}
 	}
 
@@ -488,7 +498,7 @@ func (s *Service) CommitConfiguration(from, to config.Configuration) bool {
 		s.natServiceToken = nil
 	}
 
-	return !restart
+	return true
 }
 
 func (s *Service) AllAddresses() []string {
@@ -606,4 +616,10 @@ func warningFor(dev protocol.DeviceID, msg string) {
 	if lim.TakeAvailable(1) == 1 {
 		l.Warnln(msg)
 	}
+}
+
+func tlsTimedHandshake(tc *tls.Conn) error {
+	tc.SetDeadline(time.Now().Add(tlsHandshakeTimeout))
+	defer tc.SetDeadline(time.Time{})
+	return tc.Handshake()
 }

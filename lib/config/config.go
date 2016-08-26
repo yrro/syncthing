@@ -10,6 +10,7 @@ package config
 import (
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/url"
@@ -25,7 +26,7 @@ import (
 
 const (
 	OldestHandledVersion = 10
-	CurrentVersion       = 15
+	CurrentVersion       = 16
 	MaxRescanIntervalS   = 365 * 24 * 60 * 60
 )
 
@@ -69,7 +70,10 @@ func New(myID protocol.DeviceID) Configuration {
 	util.SetDefaults(&cfg.Options)
 	util.SetDefaults(&cfg.GUI)
 
-	cfg.prepare(myID)
+	// Can't happen.
+	if err := cfg.prepare(myID); err != nil {
+		panic("bug: error in preparing new folder: " + err.Error())
+	}
 
 	return cfg
 }
@@ -81,11 +85,15 @@ func ReadXML(r io.Reader, myID protocol.DeviceID) (Configuration, error) {
 	util.SetDefaults(&cfg.Options)
 	util.SetDefaults(&cfg.GUI)
 
-	err := xml.NewDecoder(r).Decode(&cfg)
+	if err := xml.NewDecoder(r).Decode(&cfg); err != nil {
+		return Configuration{}, err
+	}
 	cfg.OriginalVersion = cfg.Version
 
-	cfg.prepare(myID)
-	return cfg, err
+	if err := cfg.prepare(myID); err != nil {
+		return Configuration{}, err
+	}
+	return cfg, nil
 }
 
 func ReadJSON(r io.Reader, myID protocol.DeviceID) (Configuration, error) {
@@ -97,14 +105,18 @@ func ReadJSON(r io.Reader, myID protocol.DeviceID) (Configuration, error) {
 
 	bs, err := ioutil.ReadAll(r)
 	if err != nil {
-		return cfg, err
+		return Configuration{}, err
 	}
 
-	err = json.Unmarshal(bs, &cfg)
+	if err := json.Unmarshal(bs, &cfg); err != nil {
+		return Configuration{}, err
+	}
 	cfg.OriginalVersion = cfg.Version
 
-	cfg.prepare(myID)
-	return cfg, err
+	if err := cfg.prepare(myID); err != nil {
+		return Configuration{}, err
+	}
+	return cfg, nil
 }
 
 type Configuration struct {
@@ -154,7 +166,37 @@ func (cfg *Configuration) WriteXML(w io.Writer) error {
 	return err
 }
 
-func (cfg *Configuration) prepare(myID protocol.DeviceID) {
+func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
+	var myName string
+
+	// Ensure this device is present in the config
+	for _, device := range cfg.Devices {
+		if device.DeviceID == myID {
+			goto found
+		}
+	}
+
+	myName, _ = os.Hostname()
+	cfg.Devices = append(cfg.Devices, DeviceConfiguration{
+		DeviceID: myID,
+		Name:     myName,
+	})
+
+found:
+
+	if err := cfg.clean(); err != nil {
+		return err
+	}
+
+	// Ensure that we are part of the devices
+	for i := range cfg.Folders {
+		cfg.Folders[i].Devices = ensureDevicePresent(cfg.Folders[i].Devices, myID)
+	}
+
+	return nil
+}
+
+func (cfg *Configuration) clean() error {
 	util.FillNilSlices(&cfg.Options)
 
 	// Initialize any empty slices
@@ -167,20 +209,23 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) {
 	if cfg.Options.AlwaysLocalNets == nil {
 		cfg.Options.AlwaysLocalNets = []string{}
 	}
+	if cfg.Options.UnackedNotificationIDs == nil {
+		cfg.Options.UnackedNotificationIDs = []string{}
+	}
 
-	// Check for missing, bad or duplicate folder ID:s
-	var seenFolders = map[string]*FolderConfiguration{}
+	// Prepare folders and check for duplicates. Duplicates are bad and
+	// dangerous, can't currently be resolved in the GUI, and shouldn't
+	// happen when configured by the GUI. We return with an error in that
+	// situation.
+	seenFolders := make(map[string]struct{})
 	for i := range cfg.Folders {
 		folder := &cfg.Folders[i]
 		folder.prepare()
 
-		if seen, ok := seenFolders[folder.ID]; ok {
-			l.Warnf("Multiple folders with ID %q; disabling", folder.ID)
-			seen.Invalid = "duplicate folder ID"
-			folder.Invalid = "duplicate folder ID"
-		} else {
-			seenFolders[folder.ID] = folder
+		if _, ok := seenFolders[folder.ID]; ok {
+			return fmt.Errorf("duplicate folder ID %q in configuration", folder.ID)
 		}
+		seenFolders[folder.ID] = struct{}{}
 	}
 
 	cfg.Options.ListenAddresses = util.UniqueStrings(cfg.Options.ListenAddresses)
@@ -206,21 +251,14 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) {
 	if cfg.Version == 14 {
 		convertV14V15(cfg)
 	}
+	if cfg.Version == 15 {
+		convertV15V16(cfg)
+	}
 
 	// Build a list of available devices
 	existingDevices := make(map[protocol.DeviceID]bool)
 	for _, device := range cfg.Devices {
 		existingDevices[device.DeviceID] = true
-	}
-
-	// Ensure this device is present in the config
-	if !existingDevices[myID] {
-		myName, _ := os.Hostname()
-		cfg.Devices = append(cfg.Devices, DeviceConfiguration{
-			DeviceID: myID,
-			Name:     myName,
-		})
-		existingDevices[myID] = true
 	}
 
 	// Ensure that the device list is free from duplicates
@@ -229,10 +267,8 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) {
 	sort.Sort(DeviceConfigurationList(cfg.Devices))
 	// Ensure that any loose devices are not present in the wrong places
 	// Ensure that there are no duplicate devices
-	// Ensure that puller settings are sane
 	// Ensure that the versioning configuration parameter map is not nil
 	for i := range cfg.Folders {
-		cfg.Folders[i].Devices = ensureDevicePresent(cfg.Folders[i].Devices, myID)
 		cfg.Folders[i].Devices = ensureExistingDevices(cfg.Folders[i].Devices, existingDevices)
 		cfg.Folders[i].Devices = ensureNoDuplicateFolderDevices(cfg.Folders[i].Devices)
 		if cfg.Folders[i].Versioning.Params == nil {
@@ -257,6 +293,18 @@ func (cfg *Configuration) prepare(myID protocol.DeviceID) {
 	if cfg.GUI.APIKey == "" {
 		cfg.GUI.APIKey = rand.String(32)
 	}
+
+	// The list of ignored devices should not contain any devices that have
+	// been manually added to the config.
+	newIgnoredDevices := []protocol.DeviceID{}
+	for _, dev := range cfg.IgnoredDevices {
+		if !existingDevices[dev] {
+			newIgnoredDevices = append(newIgnoredDevices, dev)
+		}
+	}
+	cfg.IgnoredDevices = newIgnoredDevices
+
+	return nil
 }
 
 func convertV14V15(cfg *Configuration) {
@@ -272,6 +320,11 @@ func convertV14V15(cfg *Configuration) {
 	}
 
 	cfg.Version = 15
+}
+
+func convertV15V16(cfg *Configuration) {
+	// Triggers a database tweak
+	cfg.Version = 16
 }
 
 func convertV13V14(cfg *Configuration) {

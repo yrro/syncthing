@@ -57,9 +57,8 @@ type Config struct {
 	TempLifetime time.Duration
 	// If CurrentFiler is not nil, it is queried for the current file before rescanning.
 	CurrentFiler CurrentFiler
-	// If MtimeRepo is not nil, it is used to provide mtimes on systems that
-	// don't support setting arbitrary mtimes.
-	MtimeRepo MtimeRepo
+	// The Lstater provides reliable mtimes on top of the regular filesystem.
+	Lstater Lstater
 	// If IgnorePerms is true, changes to permission bits will not be
 	// detected. Scanned files will get zero permission bits and the
 	// NoPermissionBits flag set.
@@ -88,10 +87,8 @@ type CurrentFiler interface {
 	CurrentFile(name string) (protocol.FileInfo, bool)
 }
 
-type MtimeRepo interface {
-	// GetMtime returns a (possibly modified) actual mtime given a file name
-	// and its on disk mtime.
-	GetMtime(relPath string, mtime time.Time) time.Time
+type Lstater interface {
+	Lstat(name string) (os.FileInfo, error)
 }
 
 func Walk(cfg Config) (chan protocol.FileInfo, error) {
@@ -103,8 +100,8 @@ func Walk(cfg Config) (chan protocol.FileInfo, error) {
 	if w.TempNamer == nil {
 		w.TempNamer = noTempNamer{}
 	}
-	if w.MtimeRepo == nil {
-		w.MtimeRepo = noMtimeRepo{}
+	if w.Lstater == nil {
+		w.Lstater = defaultLstater{}
 	}
 
 	return w.walk()
@@ -119,8 +116,7 @@ type walker struct {
 func (w *walker) walk() (chan protocol.FileInfo, error) {
 	l.Debugln("Walk", w.Dir, w.Subs, w.BlockSize, w.Matcher)
 
-	err := checkDir(w.Dir)
-	if err != nil {
+	if err := w.checkDir(); err != nil {
 		return nil, err
 	}
 
@@ -168,7 +164,7 @@ func (w *walker) walk() (chan protocol.FileInfo, error) {
 
 		for file := range toHashChan {
 			filesToHash = append(filesToHash, file)
-			total += int64(file.CachedSize)
+			total += int64(file.Size)
 		}
 
 		realToHashChan := make(chan protocol.FileInfo)
@@ -245,14 +241,18 @@ func (w *walker) walkAndHashFiles(fchan, dchan chan protocol.FileInfo) filepath.
 			return nil
 		}
 
-		mtime := w.MtimeRepo.GetMtime(relPath, info.ModTime())
+		info, err = w.Lstater.Lstat(absPath)
+		// An error here would be weird as we've already gotten to this point, but act on it ninetheless
+		if err != nil {
+			return skip
+		}
 
 		if w.TempNamer.IsTemporary(relPath) {
 			// A temporary file
 			l.Debugln("temporary:", relPath)
-			if info.Mode().IsRegular() && mtime.Add(w.TempLifetime).Before(now) {
+			if info.Mode().IsRegular() && info.ModTime().Add(w.TempLifetime).Before(now) {
 				os.Remove(absPath)
-				l.Debugln("removing temporary:", relPath, mtime)
+				l.Debugln("removing temporary:", relPath, info.ModTime())
 			}
 			return nil
 		}
@@ -283,17 +283,17 @@ func (w *walker) walkAndHashFiles(fchan, dchan chan protocol.FileInfo) filepath.
 			}
 
 		case info.Mode().IsDir():
-			err = w.walkDir(relPath, info, mtime, dchan)
+			err = w.walkDir(relPath, info, dchan)
 
 		case info.Mode().IsRegular():
-			err = w.walkRegular(relPath, info, mtime, fchan)
+			err = w.walkRegular(relPath, info, fchan)
 		}
 
 		return err
 	}
 }
 
-func (w *walker) walkRegular(relPath string, info os.FileInfo, mtime time.Time, fchan chan protocol.FileInfo) error {
+func (w *walker) walkRegular(relPath string, info os.FileInfo, fchan chan protocol.FileInfo) error {
 	curMode := uint32(info.Mode())
 	if runtime.GOOS == "windows" && osutil.IsWindowsExecutable(relPath) {
 		curMode |= 0111
@@ -309,25 +309,23 @@ func (w *walker) walkRegular(relPath string, info os.FileInfo, mtime time.Time, 
 	//  - was not invalid (since it looks valid now)
 	//  - has the same size as previously
 	cf, ok := w.CurrentFiler.CurrentFile(relPath)
-	permUnchanged := w.IgnorePerms || !cf.HasPermissionBits() || PermsEqual(cf.Flags, curMode)
-	if ok && permUnchanged && !cf.IsDeleted() && cf.Modified == mtime.Unix() && !cf.IsDirectory() &&
-		!cf.IsSymlink() && !cf.IsInvalid() && cf.Size() == info.Size() {
+	permUnchanged := w.IgnorePerms || !cf.HasPermissionBits() || PermsEqual(cf.Permissions, curMode)
+	if ok && permUnchanged && !cf.IsDeleted() && cf.ModTime().Equal(info.ModTime()) && !cf.IsDirectory() &&
+		!cf.IsSymlink() && !cf.IsInvalid() && cf.Size == info.Size() {
 		return nil
 	}
 
-	l.Debugln("rescan:", cf, mtime.Unix(), info.Mode()&os.ModePerm)
-
-	var flags = curMode & uint32(maskModePerm)
-	if w.IgnorePerms {
-		flags = protocol.FlagNoPermBits | 0666
-	}
+	l.Debugln("rescan:", cf, info.ModTime().Unix(), info.Mode()&os.ModePerm)
 
 	f := protocol.FileInfo{
-		Name:       relPath,
-		Version:    cf.Version.Update(w.ShortID),
-		Flags:      flags,
-		Modified:   mtime.Unix(),
-		CachedSize: info.Size(),
+		Name:          relPath,
+		Type:          protocol.FileInfoTypeFile,
+		Version:       cf.Version.Update(w.ShortID),
+		Permissions:   curMode & uint32(maskModePerm),
+		NoPermissions: w.IgnorePerms,
+		ModifiedS:     info.ModTime().Unix(),
+		ModifiedNs:    int32(info.ModTime().Nanosecond()),
+		Size:          info.Size(),
 	}
 	l.Debugln("to hash:", relPath, f)
 
@@ -340,7 +338,7 @@ func (w *walker) walkRegular(relPath string, info os.FileInfo, mtime time.Time, 
 	return nil
 }
 
-func (w *walker) walkDir(relPath string, info os.FileInfo, mtime time.Time, dchan chan protocol.FileInfo) error {
+func (w *walker) walkDir(relPath string, info os.FileInfo, dchan chan protocol.FileInfo) error {
 	// A directory is "unchanged", if it
 	//  - exists
 	//  - has the same permissions as previously, unless we are ignoring permissions
@@ -349,22 +347,19 @@ func (w *walker) walkDir(relPath string, info os.FileInfo, mtime time.Time, dcha
 	//  - was not a symlink (since it's a directory now)
 	//  - was not invalid (since it looks valid now)
 	cf, ok := w.CurrentFiler.CurrentFile(relPath)
-	permUnchanged := w.IgnorePerms || !cf.HasPermissionBits() || PermsEqual(cf.Flags, uint32(info.Mode()))
+	permUnchanged := w.IgnorePerms || !cf.HasPermissionBits() || PermsEqual(cf.Permissions, uint32(info.Mode()))
 	if ok && permUnchanged && !cf.IsDeleted() && cf.IsDirectory() && !cf.IsSymlink() && !cf.IsInvalid() {
 		return nil
 	}
 
-	flags := uint32(protocol.FlagDirectory)
-	if w.IgnorePerms {
-		flags |= protocol.FlagNoPermBits | 0777
-	} else {
-		flags |= uint32(info.Mode() & maskModePerm)
-	}
 	f := protocol.FileInfo{
-		Name:     relPath,
-		Version:  cf.Version.Update(w.ShortID),
-		Flags:    flags,
-		Modified: mtime.Unix(),
+		Name:          relPath,
+		Type:          protocol.FileInfoTypeDirectory,
+		Version:       cf.Version.Update(w.ShortID),
+		Permissions:   uint32(info.Mode() & maskModePerm),
+		NoPermissions: w.IgnorePerms,
+		ModifiedS:     info.ModTime().Unix(),
+		ModifiedNs:    int32(info.ModTime().Nanosecond()),
 	}
 	l.Debugln("dir:", relPath, f)
 
@@ -401,7 +396,7 @@ func (w *walker) walkSymlink(absPath, relPath string, dchan chan protocol.FileIn
 		return true, nil
 	}
 
-	blocks, err := Blocks(strings.NewReader(target), w.BlockSize, 0, nil)
+	blocks, err := Blocks(strings.NewReader(target), w.BlockSize, -1, nil)
 	if err != nil {
 		l.Debugln("hash link error:", absPath, err)
 		return true, nil
@@ -420,11 +415,11 @@ func (w *walker) walkSymlink(absPath, relPath string, dchan chan protocol.FileIn
 	}
 
 	f := protocol.FileInfo{
-		Name:     relPath,
-		Version:  cf.Version.Update(w.ShortID),
-		Flags:    uint32(protocol.FlagSymlink | protocol.FlagNoPermBits | 0666 | SymlinkFlags(targetType)),
-		Modified: 0,
-		Blocks:   blocks,
+		Name:          relPath,
+		Type:          SymlinkType(targetType),
+		Version:       cf.Version.Update(w.ShortID),
+		NoPermissions: true, // Symlinks don't have permissions of their own
+		Blocks:        blocks,
 	}
 
 	l.Debugln("symlink changedb:", absPath, f)
@@ -463,7 +458,7 @@ func (w *walker) normalizePath(absPath, relPath string) (normPath string, skip b
 
 		// We will attempt to normalize it.
 		normalizedPath := filepath.Join(w.Dir, normPath)
-		if _, err := osutil.Lstat(normalizedPath); os.IsNotExist(err) {
+		if _, err := w.Lstater.Lstat(normalizedPath); os.IsNotExist(err) {
 			// Nothing exists with the normalized filename. Good.
 			if err = os.Rename(absPath, normalizedPath); err != nil {
 				l.Infof(`Error normalizing UTF8 encoding of file "%s": %v`, relPath, err)
@@ -476,20 +471,18 @@ func (w *walker) normalizePath(absPath, relPath string) (normPath string, skip b
 			l.Infof(`File "%s" has UTF8 encoding conflict with another file; ignoring.`, relPath)
 			return "", true
 		}
-
-		relPath = normPath
 	}
 
 	return normPath, false
 }
 
-func checkDir(dir string) error {
-	if info, err := osutil.Lstat(dir); err != nil {
+func (w *walker) checkDir() error {
+	if info, err := w.Lstater.Lstat(w.Dir); err != nil {
 		return err
 	} else if !info.IsDir() {
-		return errors.New(dir + ": not a directory")
+		return errors.New(w.Dir + ": not a directory")
 	} else {
-		l.Debugln("checkDir", dir, info)
+		l.Debugln("checkDir", w.Dir, info)
 	}
 	return nil
 }
@@ -519,21 +512,21 @@ func SymlinkTypeEqual(disk symlinks.TargetType, f protocol.FileInfo) bool {
 	case symlinks.TargetUnknown:
 		return true
 	case symlinks.TargetDirectory:
-		return f.IsDirectory() && f.Flags&protocol.FlagSymlinkMissingTarget == 0
+		return f.Type == protocol.FileInfoTypeSymlinkDirectory
 	case symlinks.TargetFile:
-		return !f.IsDirectory() && f.Flags&protocol.FlagSymlinkMissingTarget == 0
+		return f.Type == protocol.FileInfoTypeSymlinkFile
 	}
 	panic("unknown symlink TargetType")
 }
 
-func SymlinkFlags(t symlinks.TargetType) uint32 {
+func SymlinkType(t symlinks.TargetType) protocol.FileInfoType {
 	switch t {
 	case symlinks.TargetFile:
-		return 0
+		return protocol.FileInfoTypeSymlinkFile
 	case symlinks.TargetDirectory:
-		return protocol.FlagDirectory
+		return protocol.FileInfoTypeSymlinkDirectory
 	case symlinks.TargetUnknown:
-		return protocol.FlagSymlinkMissingTarget
+		return protocol.FileInfoTypeSymlinkUnknown
 	}
 	panic("unknown symlink TargetType")
 }
@@ -599,10 +592,10 @@ func (noTempNamer) IsTemporary(path string) bool {
 	return false
 }
 
-// A no-op MtimeRepo
+// A no-op Lstater
 
-type noMtimeRepo struct{}
+type defaultLstater struct{}
 
-func (noMtimeRepo) GetMtime(relPath string, mtime time.Time) time.Time {
-	return mtime
+func (defaultLstater) Lstat(name string) (os.FileInfo, error) {
+	return osutil.Lstat(name)
 }

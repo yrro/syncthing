@@ -137,7 +137,7 @@ func (t *ProgressEmitter) sendDownloadProgressMessages() {
 			updates := state.update(folder, activePullers)
 
 			if len(updates) > 0 {
-				conn.DownloadProgress(folder, updates, 0, nil)
+				conn.DownloadProgress(folder, updates)
 			}
 		}
 	}
@@ -190,6 +190,9 @@ func (t *ProgressEmitter) CommitConfiguration(from, to config.Configuration) boo
 	defer t.mut.Unlock()
 
 	t.interval = time.Duration(to.Options.ProgressUpdateIntervalS) * time.Second
+	if t.interval < time.Second {
+		t.interval = time.Second
+	}
 	t.minBlocks = to.Options.TempIndexMinBlocks
 	l.Debugln("progress emitter: updated interval", t.interval)
 

@@ -14,6 +14,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/sync"
+	"github.com/syncthing/syncthing/lib/util"
 )
 
 func init() {
@@ -33,6 +34,8 @@ type Staggered struct {
 	interval      [4]Interval
 	mutex         sync.Mutex
 }
+
+var testCleanDone chan struct{}
 
 func NewStaggered(folderID, folderPath string, params map[string]string) Versioner {
 	maxAge, err := strconv.ParseInt(params["maxAge"], 10, 0)
@@ -71,7 +74,10 @@ func NewStaggered(folderID, folderPath string, params map[string]string) Version
 
 	go func() {
 		s.clean()
-		for _ = range time.Tick(time.Duration(cleanInterval) * time.Second) {
+		if testCleanDone != nil {
+			close(testCleanDone)
+		}
+		for range time.Tick(time.Duration(cleanInterval) * time.Second) {
 			s.clean()
 		}
 	}()
@@ -159,7 +165,7 @@ func (v Staggered) expire(versions []string) {
 			continue
 		}
 
-		if err := osutil.Remove(file); err != nil {
+		if err := os.Remove(file); err != nil {
 			l.Warnf("Versioner: can't remove %q: %v", file, err)
 		}
 	}
@@ -280,7 +286,7 @@ func (v Staggered) Archive(filePath string) error {
 
 	// Use all the found filenames.
 	versions := append(oldVersions, newVersions...)
-	v.expire(uniqueSortedStrings(versions))
+	v.expire(util.UniqueStrings(versions))
 
 	return nil
 }

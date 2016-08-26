@@ -8,6 +8,7 @@ package connections
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/url"
 	"time"
@@ -26,6 +27,10 @@ type IntermediateConnection struct {
 type Connection struct {
 	IntermediateConnection
 	protocol.Connection
+}
+
+func (c Connection) String() string {
+	return fmt.Sprintf("%s-%s/%s", c.LocalAddr(), c.RemoteAddr(), c.Type)
 }
 
 type dialerFactory interface {
@@ -69,8 +74,8 @@ type Model interface {
 	AddConnection(conn Connection, hello protocol.HelloResult)
 	ConnectedTo(remoteID protocol.DeviceID) bool
 	IsPaused(remoteID protocol.DeviceID) bool
-	OnHello(protocol.DeviceID, net.Addr, protocol.HelloResult)
-	GetHello(protocol.DeviceID) protocol.Version13HelloMessage
+	OnHello(protocol.DeviceID, net.Addr, protocol.HelloResult) error
+	GetHello(protocol.DeviceID) protocol.HelloIntf
 }
 
 // serviceFunc wraps a function to create a suture.Service without stop

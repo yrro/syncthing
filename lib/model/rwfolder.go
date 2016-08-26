@@ -13,6 +13,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -28,8 +30,6 @@ import (
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/versioner"
 )
-
-// TODO: Stop on errors
 
 func init() {
 	folderFactories[config.FolderTypeReadWrite] = newRWFolder
@@ -80,18 +80,20 @@ type dbUpdateJob struct {
 type rwFolder struct {
 	folder
 
-	virtualMtimeRepo *db.VirtualMtimeRepo
-	dir              string
-	versioner        versioner.Versioner
-	ignorePerms      bool
-	copiers          int
-	pullers          int
-	order            config.PullOrder
-	maxConflicts     int
-	sleep            time.Duration
-	pause            time.Duration
-	allowSparse      bool
-	checkFreeSpace   bool
+	mtimeFS        *fs.MtimeFS
+	dir            string
+	versioner      versioner.Versioner
+	ignorePerms    bool
+	order          config.PullOrder
+	maxConflicts   int
+	sleep          time.Duration
+	pause          time.Duration
+	allowSparse    bool
+	checkFreeSpace bool
+	ignoreDelete   bool
+
+	copiers int
+	pullers int
 
 	queue       *jobQueue
 	dbUpdates   chan dbUpdateJob
@@ -104,33 +106,26 @@ type rwFolder struct {
 	initialScanCompleted chan (struct{}) // exposed for testing
 }
 
-func newRWFolder(model *Model, cfg config.FolderConfiguration, ver versioner.Versioner) service {
+func newRWFolder(model *Model, cfg config.FolderConfiguration, ver versioner.Versioner, mtimeFS *fs.MtimeFS) service {
 	f := &rwFolder{
 		folder: folder{
-			stateTracker: stateTracker{
-				folderID: cfg.ID,
-				mut:      sync.NewMutex(),
-			},
-			scan: folderscan{
-				interval: time.Duration(cfg.RescanIntervalS) * time.Second,
-				timer:    time.NewTimer(time.Millisecond), // The first scan should be done immediately.
-				now:      make(chan rescanRequest),
-				delay:    make(chan time.Duration),
-			},
-			stop:  make(chan struct{}),
-			model: model,
+			stateTracker: newStateTracker(cfg.ID),
+			scan:         newFolderScanner(cfg),
+			stop:         make(chan struct{}),
+			model:        model,
 		},
 
-		virtualMtimeRepo: db.NewVirtualMtimeRepo(model.db, cfg.ID),
-		dir:              cfg.Path(),
-		ignorePerms:      cfg.IgnorePerms,
-		copiers:          cfg.Copiers,
-		pullers:          cfg.Pullers,
-		order:            cfg.Order,
-		maxConflicts:     cfg.MaxConflicts,
-		allowSparse:      !cfg.DisableSparseFiles,
-		checkFreeSpace:   cfg.MinDiskFreePct != 0,
-		versioner:        ver,
+		mtimeFS:        mtimeFS,
+		dir:            cfg.Path(),
+		versioner:      ver,
+		ignorePerms:    cfg.IgnorePerms,
+		copiers:        cfg.Copiers,
+		pullers:        cfg.Pullers,
+		order:          cfg.Order,
+		maxConflicts:   cfg.MaxConflicts,
+		allowSparse:    !cfg.DisableSparseFiles,
+		checkFreeSpace: cfg.MinDiskFreePct != 0,
+		ignoreDelete:   cfg.IgnoreDelete,
 
 		queue:       newJobQueue(),
 		pullTimer:   time.NewTimer(time.Second),
@@ -171,7 +166,7 @@ func (f *rwFolder) configureCopiersAndPullers(config config.FolderConfiguration)
 // set on the local host or the FlagNoPermBits has been set on the file/dir
 // which is being pulled.
 func (f *rwFolder) ignorePermissions(file protocol.FileInfo) bool {
-	return f.ignorePerms || file.Flags&protocol.FlagNoPermBits != 0
+	return f.ignorePerms || file.NoPermissions
 }
 
 // Serve will run scans and pulls. It will return when Stop()ed or on a
@@ -187,7 +182,7 @@ func (f *rwFolder) Serve() {
 		f.setState(FolderIdle)
 	}()
 
-	var prevVer int64
+	var prevSec int64
 	var prevIgnoreHash string
 
 	for {
@@ -196,7 +191,7 @@ func (f *rwFolder) Serve() {
 			return
 
 		case <-f.remoteIndex:
-			prevVer = 0
+			prevSec = 0
 			f.pullTimer.Reset(0)
 			l.Debugln(f, "remote index updated, rescheduling pull")
 
@@ -218,14 +213,14 @@ func (f *rwFolder) Serve() {
 				// The ignore patterns have changed. We need to re-evaluate if
 				// there are files we need now that were ignored before.
 				l.Debugln(f, "ignore patterns have changed, resetting prevVer")
-				prevVer = 0
+				prevSec = 0
 				prevIgnoreHash = newHash
 			}
 
-			// RemoteLocalVersion() is a fast call, doesn't touch the database.
-			curVer, ok := f.model.RemoteLocalVersion(f.folderID)
-			if !ok || curVer == prevVer {
-				l.Debugln(f, "skip (curVer == prevVer)", prevVer, ok)
+			// RemoteSequence() is a fast call, doesn't touch the database.
+			curSeq, ok := f.model.RemoteSequence(f.folderID)
+			if !ok || curSeq == prevSec {
+				l.Debugln(f, "skip (curSeq == prevSeq)", prevSec, ok)
 				f.pullTimer.Reset(f.sleep)
 				continue
 			}
@@ -236,7 +231,7 @@ func (f *rwFolder) Serve() {
 				continue
 			}
 
-			l.Debugln(f, "pulling", prevVer, curVer)
+			l.Debugln(f, "pulling", prevSec, curSeq)
 
 			f.setState(FolderSyncing)
 			f.clearErrors()
@@ -253,19 +248,19 @@ func (f *rwFolder) Serve() {
 					// sync. Remember the local version number and
 					// schedule a resync a little bit into the future.
 
-					if lv, ok := f.model.RemoteLocalVersion(f.folderID); ok && lv < curVer {
+					if lv, ok := f.model.RemoteSequence(f.folderID); ok && lv < curSeq {
 						// There's a corner case where the device we needed
 						// files from disconnected during the puller
 						// iteration. The files will have been removed from
 						// the index, so we've concluded that we don't need
 						// them, but at the same time we have the local
 						// version that includes those files in curVer. So we
-						// catch the case that localVersion might have
+						// catch the case that sequence might have
 						// decreased here.
 						l.Debugln(f, "adjusting curVer", lv)
-						curVer = lv
+						curSeq = lv
 					}
-					prevVer = curVer
+					prevSec = curSeq
 					l.Debugln(f, "next pull in", f.sleep)
 					f.pullTimer.Reset(f.sleep)
 					break
@@ -297,7 +292,7 @@ func (f *rwFolder) Serve() {
 		// same time.
 		case <-f.scan.timer.C:
 			err := f.scanSubdirsIfHealthy(nil)
-			f.scan.reschedule()
+			f.scan.Reschedule()
 			if err != nil {
 				continue
 			}
@@ -431,22 +426,36 @@ func (f *rwFolder) pullerIteration(ignores *ignore.Matcher) int {
 		// directories as they come along, so parents before children. Files
 		// are queued and the order may be changed later.
 
-		file := intf.(protocol.FileInfo)
-
-		if ignores.Match(file.Name).IsIgnored() {
-			// This is an ignored file. Skip it, continue iteration.
+		if shouldIgnore(intf, ignores, f.ignoreDelete) {
 			return true
 		}
 
-		l.Debugln(f, "handling", file.Name)
-
-		if !handleFile(file) {
-			// A new or changed file or symlink. This is the only case where we
-			// do stuff concurrently in the background
-			f.queue.Push(file.Name, file.Size(), file.Modified)
+		if err := fileValid(intf); err != nil {
+			// The file isn't valid so we can't process it. Pretend that we
+			// tried and set the error for the file.
+			f.newError(intf.FileName(), err)
+			changed++
+			return true
 		}
 
-		changed++
+		file := intf.(protocol.FileInfo)
+		l.Debugln(f, "handling", file.Name)
+		if !handleFile(file) {
+			// A new or changed file or symlink. This is the only case where
+			// we do stuff concurrently in the background. We only queue
+			// files where we are connected to at least one device that has
+			// the file.
+
+			devices := folderFiles.Availability(file.Name)
+			for _, dev := range devices {
+				if f.model.ConnectedTo(dev) {
+					f.queue.Push(file.Name, file.Size, file.ModTime())
+					changed++
+					break
+				}
+			}
+		}
+
 		return true
 	})
 
@@ -577,7 +586,7 @@ func (f *rwFolder) handleDir(file protocol.FileInfo) {
 	}()
 
 	realName := filepath.Join(f.dir, file.Name)
-	mode := os.FileMode(file.Flags & 0777)
+	mode := os.FileMode(file.Permissions & 0777)
 	if f.ignorePermissions(file) {
 		mode = 0777
 	}
@@ -587,13 +596,13 @@ func (f *rwFolder) handleDir(file protocol.FileInfo) {
 		l.Debugf("need dir\n\t%v\n\t%v", file, curFile)
 	}
 
-	info, err := osutil.Lstat(realName)
+	info, err := f.mtimeFS.Lstat(realName)
 	switch {
 	// There is already something under that name, but it's a file/link.
 	// Most likely a file/link is getting replaced with a directory.
 	// Remove the file/link and fall through to directory creation.
 	case err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0):
-		err = osutil.InWritableDir(osutil.Remove, realName)
+		err = osutil.InWritableDir(os.Remove, realName)
 		if err != nil {
 			l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
@@ -613,7 +622,7 @@ func (f *rwFolder) handleDir(file protocol.FileInfo) {
 			}
 
 			// Stat the directory so we can check its permissions.
-			info, err := osutil.Lstat(path)
+			info, err := f.mtimeFS.Lstat(path)
 			if err != nil {
 				return err
 			}
@@ -678,17 +687,17 @@ func (f *rwFolder) deleteDir(file protocol.FileInfo, matcher *ignore.Matcher) {
 		for _, dirFile := range files {
 			fullDirFile := filepath.Join(file.Name, dirFile)
 			if defTempNamer.IsTemporary(dirFile) || (matcher != nil && matcher.Match(fullDirFile).IsDeletable()) {
-				osutil.RemoveAll(filepath.Join(f.dir, fullDirFile))
+				os.RemoveAll(filepath.Join(f.dir, fullDirFile))
 			}
 		}
 		dir.Close()
 	}
 
-	err = osutil.InWritableDir(osutil.Remove, realName)
+	err = osutil.InWritableDir(os.Remove, realName)
 	if err == nil || os.IsNotExist(err) {
 		// It was removed or it doesn't exist to start with
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateDeleteDir}
-	} else if _, serr := os.Lstat(realName); serr != nil && !os.IsPermission(serr) {
+	} else if _, serr := f.mtimeFS.Lstat(realName); serr != nil && !os.IsPermission(serr) {
 		// We get an error just looking at the directory, and it's not a
 		// permission problem. Lets assume the error is in fact some variant
 		// of "file does not exist" (possibly expressed as some parent being a
@@ -729,13 +738,16 @@ func (f *rwFolder) deleteFile(file protocol.FileInfo) {
 		file.Version = file.Version.Merge(cur.Version)
 		err = osutil.InWritableDir(f.moveForConflict, realName)
 	} else {
+	} else if f.versioner != nil {
 		err = osutil.InWritableDir(f.versioner.Archive, realName)
+	} else {
+		err = osutil.InWritableDir(os.Remove, realName)
 	}
 
 	if err == nil || os.IsNotExist(err) {
 		// It was removed or it doesn't exist to start with
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateDeleteFile}
-	} else if _, serr := os.Lstat(realName); serr != nil && !os.IsPermission(serr) {
+	} else if _, serr := f.mtimeFS.Lstat(realName); serr != nil && !os.IsPermission(serr) {
 		// We get an error just looking at the file, and it's not a permission
 		// problem. Lets assume the error is in fact some variant of "file
 		// does not exist" (possibly expressed as some parent being a file and
@@ -807,7 +819,7 @@ func (f *rwFolder) renameFile(source, target protocol.FileInfo) {
 		// get rid of. Attempt to delete it instead so that we make *some*
 		// progress. The target is unhandled.
 
-		err = osutil.InWritableDir(osutil.Remove, from)
+		err = osutil.InWritableDir(os.Remove, from)
 		if err != nil {
 			l.Infof("Puller (folder %q, file %q): delete %q after failed rename: %v", f.folderID, target.Name, source.Name, err)
 			f.newError(target.Name, err)
@@ -906,9 +918,8 @@ func (f *rwFolder) handleFile(file protocol.FileInfo, copyChan chan<- copyBlocks
 		// the database. If there's a mismatch here, there might be local
 		// changes that we don't know about yet and we should scan before
 		// touching the file. If we can't stat the file we'll just pull it.
-		if info, err := osutil.Lstat(realName); err == nil {
-			mtime := f.virtualMtimeRepo.GetMtime(file.Name, info.ModTime())
-			if mtime.Unix() != curFile.Modified || info.Size() != curFile.Size() {
+		if info, err := f.mtimeFS.Lstat(realName); err == nil {
+			if !info.ModTime().Equal(curFile.ModTime()) || info.Size() != curFile.Size {
 				l.Debugln("file modified but not rescanned; not pulling:", realName)
 				// Scan() is synchronous (i.e. blocks until the scan is
 				// completed and returns an error), but a scan can't happen
@@ -931,7 +942,7 @@ func (f *rwFolder) handleFile(file protocol.FileInfo, copyChan chan<- copyBlocks
 
 	// Check for an old temporary file which might have some blocks we could
 	// reuse.
-	tempBlocks, err := scanner.HashFile(tempName, protocol.BlockSize, 0, nil)
+	tempBlocks, err := scanner.HashFile(tempName, protocol.BlockSize, nil)
 	if err == nil {
 		// Check for any reusable blocks in the temp file
 		tempCopyBlocks, _ := scanner.BlockDiff(tempBlocks, file.Blocks)
@@ -959,12 +970,12 @@ func (f *rwFolder) handleFile(file protocol.FileInfo, copyChan chan<- copyBlocks
 			// Otherwise, discard the file ourselves in order for the
 			// sharedpuller not to panic when it fails to exclusively create a
 			// file which already exists
-			osutil.InWritableDir(osutil.Remove, tempName)
+			osutil.InWritableDir(os.Remove, tempName)
 		}
 	} else {
 		// Copy the blocks, as we don't want to shuffle them on the FileInfo
 		blocks = append(blocks, file.Blocks...)
-		blocksSize = file.Size()
+		blocksSize = file.Size
 	}
 
 	if f.checkFreeSpace {
@@ -1020,25 +1031,14 @@ func (f *rwFolder) handleFile(file protocol.FileInfo, copyChan chan<- copyBlocks
 func (f *rwFolder) shortcutFile(file protocol.FileInfo) error {
 	realName := filepath.Join(f.dir, file.Name)
 	if !f.ignorePermissions(file) {
-		if err := os.Chmod(realName, os.FileMode(file.Flags&0777)); err != nil {
+		if err := os.Chmod(realName, os.FileMode(file.Permissions&0777)); err != nil {
 			l.Infof("Puller (folder %q, file %q): shortcut: chmod: %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
 			return err
 		}
 	}
 
-	t := time.Unix(file.Modified, 0)
-	if err := os.Chtimes(realName, t, t); err != nil {
-		// Try using virtual mtimes
-		info, err := os.Stat(realName)
-		if err != nil {
-			l.Infof("Puller (folder %q, file %q): shortcut: unable to stat file: %v", f.folderID, file.Name, err)
-			f.newError(file.Name, err)
-			return err
-		}
-
-		f.virtualMtimeRepo.UpdateMtime(file.Name, info.ModTime(), t)
-	}
+	f.mtimeFS.Chtimes(realName, file.ModTime(), file.ModTime()) // never fails
 
 	// This may have been a conflict. We should merge the version vectors so
 	// that our clock doesn't move backwards.
@@ -1234,25 +1234,48 @@ func (f *rwFolder) pullerRoutine(in <-chan pullBlockState, out chan<- *sharedPul
 func (f *rwFolder) performFinish(state *sharedPullerState) error {
 	// Set the correct permission bits on the new file
 	if !f.ignorePermissions(state.file) {
-		if err := os.Chmod(state.tempName, os.FileMode(state.file.Flags&0777)); err != nil {
+		if err := os.Chmod(state.tempName, os.FileMode(state.file.Permissions&0777)); err != nil {
 			return err
 		}
 	}
 
-	// Set the correct timestamp on the new file
-	t := time.Unix(state.file.Modified, 0)
-	if err := os.Chtimes(state.tempName, t, t); err != nil {
-		// Try using virtual mtimes instead
-		info, err := os.Stat(state.tempName)
-		if err != nil {
-			return err
-		}
-		f.virtualMtimeRepo.UpdateMtime(state.file.Name, info.ModTime(), t)
-	}
+	if stat, err := f.mtimeFS.Lstat(state.realName); err == nil {
+		// There is an old file or directory already in place. We need to
+		// handle that.
 
-	if fileInfo, err := osutil.Lstat(state.realName); err == nil {
-		if err := f.handleOldFileOrOldDirectory(fileInfo, state); err != nil {
-			return err
+		switch {
+		case stat.IsDir() || stat.Mode()&os.ModeSymlink != 0:
+			// It's a directory or a symlink. These are not versioned or
+			// archived for conflicts, only removed (which of course fails for
+			// non-empty directories).
+
+			// TODO: This is the place where we want to remove temporary files
+			// and future hard ignores before attempting a directory delete.
+			// Should share code with f.deletDir().
+
+			if err = osutil.InWritableDir(os.Remove, state.realName); err != nil {
+				return err
+			}
+
+		case f.inConflict(state.version, state.file.Version):
+			// The new file has been changed in conflict with the existing one. We
+			// should file it away as a conflict instead of just removing or
+			// archiving. Also merge with the version vector we had, to indicate
+			// we have resolved the conflict.
+
+			state.file.Version = state.file.Version.Merge(state.version)
+			if err = osutil.InWritableDir(f.moveForConflict, state.realName); err != nil {
+				return err
+			}
+
+		case f.versioner != nil:
+			// If we should use versioning, let the versioner archive the old
+			// file before we replace it. Archiving a non-existent file is not
+			// an error.
+
+			if err = f.versioner.Archive(state.realName); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1261,6 +1284,9 @@ func (f *rwFolder) performFinish(state *sharedPullerState) error {
 	if err := osutil.TryRename(state.tempName, state.realName); err != nil {
 		return err
 	}
+
+	// Set the correct timestamp on the new file
+	f.mtimeFS.Chtimes(state.realName, state.file.ModTime(), state.file.ModTime()) // never fails
 
 	// If it's a symlink, the target of the symlink is inside the file.
 	if state.file.IsSymlink() {
@@ -1406,7 +1432,7 @@ loop:
 				break loop
 			}
 
-			job.file.LocalVersion = 0
+			job.file.Sequence = 0
 			batch = append(batch, job)
 
 			if len(batch) == maxBatchSize {
@@ -1454,14 +1480,14 @@ func removeAvailability(availabilities []Availability, availability Availability
 func (f *rwFolder) moveForConflict(name string) error {
 	if strings.Contains(filepath.Base(name), ".sync-conflict-") {
 		l.Infoln("Conflict for", name, "which is already a conflict copy; not copying again.")
-		if err := osutil.Remove(name); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
 	}
 
 	if f.maxConflicts == 0 {
-		if err := osutil.Remove(name); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 		return nil
@@ -1483,7 +1509,7 @@ func (f *rwFolder) moveForConflict(name string) error {
 		if gerr == nil && len(matches) > f.maxConflicts {
 			sort.Sort(sort.Reverse(sort.StringSlice(matches)))
 			for _, match := range matches[f.maxConflicts:] {
-				gerr = osutil.Remove(match)
+				gerr = os.Remove(match)
 				if gerr != nil {
 					l.Debugln(f, "removing extra conflict", gerr)
 				}
@@ -1544,4 +1570,45 @@ func (l fileErrorList) Less(a, b int) bool {
 
 func (l fileErrorList) Swap(a, b int) {
 	l[a], l[b] = l[b], l[a]
+}
+
+// fileValid returns nil when the file is valid for processing, or an error if it's not
+func fileValid(file db.FileIntf) error {
+	switch {
+	case file.IsDeleted():
+		// We don't care about file validity if we're not supposed to have it
+		return nil
+
+	case !symlinks.Supported && file.IsSymlink():
+		return errUnsupportedSymlink
+
+	case runtime.GOOS == "windows" && windowsInvalidFilename(file.FileName()):
+		return errInvalidFilename
+	}
+
+	return nil
+}
+
+var windowsDisallowedCharacters = string([]rune{
+	'<', '>', ':', '"', '|', '?', '*',
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+	11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+	21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+	31,
+})
+
+func windowsInvalidFilename(name string) bool {
+	// None of the path components should end in space
+	for _, part := range strings.Split(name, `\`) {
+		if len(part) == 0 {
+			continue
+		}
+		if part[len(part)-1] == ' ' {
+			// Names ending in space are not valid.
+			return true
+		}
+	}
+
+	// The path must not contain any disallowed characters
+	return strings.ContainsAny(name, windowsDisallowedCharacters)
 }
