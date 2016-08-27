@@ -18,7 +18,7 @@ import (
 )
 
 func TestStaggeredVersioningVersionCount(t *testing.T) {
-	/* Default settings:
+	/* Default settings: 
 
 	{30, 3600},       // first hour -> 30 sec between versions
 	{3600, 86400},    // next day -> 1 h between versions
